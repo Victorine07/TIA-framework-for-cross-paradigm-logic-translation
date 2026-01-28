@@ -1,0 +1,354 @@
+theory SKINNY_Block_Cipher
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+    "HOL-Library.Sublist"
+    "HOL-Library.Phantom_Type"
+begin
+
+section \<open>SKINNY Block Cipher Family\<close>
+
+subsection \<open>Configuration Parameters\<close>
+
+datatype block_size = BS_64 | BS_128
+datatype key_size = KS_64 | KS_128 | KS_192 | KS_256 | KS_384
+
+(* Get cell size in bits based on block size *)
+fun cell_bits :: "block_size \<Rightarrow> nat" where
+  "cell_bits BS_64 = 4"
+| "cell_bits BS_128 = 8"
+
+(* Get number of rounds based on configuration *)
+fun num_rounds :: "block_size \<Rightarrow> key_size \<Rightarrow> nat" where
+  "num_rounds BS_64 KS_64 = 32"
+| "num_rounds BS_64 KS_128 = 36"
+| "num_rounds BS_64 KS_192 = 40"
+| "num_rounds BS_128 KS_128 = 40"
+| "num_rounds BS_128 KS_256 = 48"
+| "num_rounds BS_128 KS_384 = 56"
+
+(* Define types for state elements *)
+type_synonym nibble = "4 word"
+type_synonym byte = "8 word"
+
+(* State is a 4\<times>4 matrix *)
+type_synonym state_4x4_nibble = "(nibble \<times> nibble \<times> nibble \<times> nibble) \<times>
+                                (nibble \<times> nibble \<times> nibble \<times> nibble) \<times>
+                                (nibble \<times> nibble \<times> nibble \<times> nibble) \<times>
+                                (nibble \<times> nibble \<times> nibble \<times> nibble)"
+
+type_synonym state_4x4_byte = "(byte \<times> byte \<times> byte \<times> byte) \<times>
+                              (byte \<times> byte \<times> byte \<times> byte) \<times>
+                              (byte \<times> byte \<times> byte \<times> byte) \<times>
+                              (byte \<times> byte \<times> byte \<times> byte)"
+
+(* Polymorphic state type *)
+datatype ('a) skinny_state = State4x4 "('a \<times> 'a \<times> 'a \<times> 'a) \<times> 
+                                       ('a \<times> 'a \<times> 'a \<times> 'a) \<times> 
+                                       ('a \<times> 'a \<times> 'a \<times> 'a) \<times> 
+                                       ('a \<times> 'a \<times> 'a \<times> 'a)"
+
+subsection \<open>S-Box Definitions\<close>
+
+(* 4-bit S-box from specification *)
+definition sbox4_table :: "nat list" where
+  "sbox4_table = [0xC, 0x6, 0x9, 0x0, 0x1, 0xA, 0x2, 0xB,
+                  0x3, 0x8, 0x5, 0xD, 0x4, 0xE, 0x7, 0xF]"
+
+definition sbox4_inv_table :: "nat list" where
+  "sbox4_inv_table = [0x3, 0x4, 0x6, 0x8, 0xC, 0xA, 0x1, 0xE,
+                      0x9, 0x2, 0x5, 0x7, 0x0, 0xB, 0xD, 0xF]"
+
+definition sbox4 :: "nibble \<Rightarrow> nibble" where
+  "sbox4 x = (of_nat (sbox4_table ! unat x) :: 4 word)"
+
+definition sbox4_inv :: "nibble \<Rightarrow> nibble" where
+  "sbox4_inv x = (of_nat (sbox4_inv_table ! unat x) :: 4 word)"
+
+(* 8-bit S-box from specification *)
+definition sbox8_table :: "nat list" where
+  "sbox8_table = [
+    0x65, 0x4C, 0x6A, 0x42, 0x4B, 0x63, 0x43, 0x6B, 0x55, 0x75, 0x5A, 0x7A, 0x53, 0x73, 0x5B, 0x7B,
+    0x35, 0x8C, 0x3A, 0x81, 0x89, 0x33, 0x80, 0x3B, 0x95, 0x25, 0x98, 0x2A, 0x90, 0x23, 0x99, 0x2B,
+    0xE5, 0xCC, 0xE8, 0xC1, 0xC9, 0xE0, 0xC0, 0xE9, 0xD5, 0xF5, 0xD8, 0xF8, 0xD0, 0xF0, 0xD9, 0xF9,
+    0xA5, 0x1C, 0xA8, 0x12, 0x1B, 0xA0, 0x13, 0xA9, 0x05, 0xB5, 0x0A, 0xB8, 0x03, 0xB0, 0x0B, 0xB9,
+    0x32, 0x88, 0x3C, 0x85, 0x8D, 0x34, 0x84, 0x3D, 0x91, 0x22, 0x9C, 0x2C, 0x94, 0x24, 0x9D, 0x2D,
+    0x62, 0x4A, 0x6C, 0x45, 0x4D, 0x64, 0x44, 0x6D, 0x52, 0x72, 0x5C, 0x7C, 0x54, 0x74, 0x5D, 0x7D,
+    0xA1, 0x1A, 0xAC, 0x15, 0x1D, 0xA4, 0x14, 0xAD, 0x02, 0xB1, 0x0C, 0xBC, 0x04, 0xB4, 0x0D, 0xBD,
+    0xE1, 0xC8, 0xEC, 0xC5, 0xCD, 0xE4, 0xC4, 0xED, 0xD1, 0xF1, 0xDC, 0xFC, 0xD4, 0xF4, 0xDD, 0xFD,
+    0x36, 0x8E, 0x38, 0x82, 0x8B, 0x30, 0x83, 0x39, 0x96, 0x26, 0x9A, 0x28, 0x93, 0x20, 0x9B, 0x29,
+    0x66, 0x4E, 0x68, 0x41, 0x49, 0x60, 0x40, 0x69, 0x56, 0x76, 0x58, 0x78, 0x50, 0x70, 0x59, 0x79,
+    0xA6, 0x1E, 0xAA, 0x11, 0x19, 0xA3, 0x10, 0xAB, 0x06, 0xB6, 0x08, 0xBA, 0x00, 0xB3, 0x09, 0xBB,
+    0xE6, 0xCE, 0xEA, 0xC2, 0xCB, 0xE3, 0xC3, 0xEB, 0xD6, 0xF6, 0xDA, 0xFA, 0xD3, 0xF3, 0xDB, 0xFB,
+    0x31, 0x8A, 0x3E, 0x86, 0x8F, 0x37, 0x87, 0x3F, 0x92, 0x21, 0x9E, 0x2E, 0x97, 0x27, 0x9F, 0x2F,
+    0x61, 0x48, 0x6E, 0x46, 0x4F, 0x67, 0x47, 0x6F, 0x51, 0x71, 0x5E, 0x7E, 0x57, 0x77, 0x5F, 0x7F,
+    0xA2, 0x18, 0xAE, 0x16, 0x1F, 0xA7, 0x17, 0xAF, 0x01, 0xB2, 0x0E, 0xBE, 0x07, 0xB7, 0x0F, 0xBF,
+    0xE2, 0xCA, 0xEE, 0xC6, 0xCF, 0xE7, 0xC7, 0xEF, 0xD2, 0xF2, 0xDE, 0xFE, 0xD7, 0xF7, 0xDF, 0xFF]"
+
+definition sbox8_inv_table :: "nat list" where
+  "sbox8_inv_table = [
+    0xAC, 0xE8, 0x68, 0x3C, 0x6C, 0x38, 0xA8, 0xEC, 0xAA, 0xAE, 0x3A, 0x3E, 0x6A, 0x6E, 0xEA, 0xEE,
+    0xA6, 0xA3, 0x33, 0x36, 0x66, 0x63, 0xE3, 0xE6, 0xE1, 0xA4, 0x61, 0x34, 0x31, 0x64, 0xA1, 0xE4,
+    0x8D, 0xC9, 0x49, 0x1D, 0x4D, 0x19, 0x89, 0xCD, 0x8B, 0x8F, 0x1B, 0x1F, 0x4B, 0x4F, 0xCB, 0xCF,
+    0x85, 0xC0, 0x40, 0x15, 0x45, 0x10, 0x80, 0xC5, 0x82, 0x87, 0x12, 0x17, 0x42, 0x47, 0xC2, 0xC7,
+    0x96, 0x93, 0x03, 0x06, 0x56, 0x53, 0xD3, 0xD6, 0xD1, 0x94, 0x51, 0x04, 0x01, 0x54, 0x91, 0xD4,
+    0x9C, 0xD8, 0x58, 0x0C, 0x5C, 0x08, 0x98, 0xDC, 0x9A, 0x9E, 0x0A, 0x0E, 0x5A, 0x5E, 0xDA, 0xDE,
+    0x95, 0xD0, 0x50, 0x05, 0x55, 0x00, 0x90, 0xD5, 0x92, 0x97, 0x02, 0x07, 0x52, 0x57, 0xD2, 0xD7,
+    0x9D, 0xD9, 0x59, 0x0D, 0x5D, 0x09, 0x99, 0xDD, 0x9B, 0x9F, 0x0B, 0x0F, 0x5B, 0x5F, 0xDB, 0xDF,
+    0x16, 0x13, 0x83, 0x86, 0x46, 0x43, 0xC3, 0xC6, 0x41, 0x14, 0xC1, 0x84, 0x11, 0x44, 0x81, 0xC4,
+    0x1C, 0x48, 0xC8, 0x8C, 0x4C, 0x18, 0x88, 0xCC, 0x1A, 0x1E, 0x8A, 0x8E, 0x4A, 0x4E, 0xCA, 0xCE,
+    0x35, 0x60, 0xE0, 0xA5, 0x65, 0x30, 0xA0, 0xE5, 0x32, 0x37, 0xA2, 0xA7, 0x62, 0x67, 0xE2, 0xE7,
+    0x3D, 0x69, 0xE9, 0xAD, 0x6D, 0x39, 0xA9, 0xED, 0x3B, 0x3F, 0xAB, 0xAF, 0x6B, 0x6F, 0xEB, 0xEF,
+    0x26, 0x23, 0xB3, 0xB6, 0x76, 0x73, 0xF3, 0xF6, 0x71, 0x24, 0xF1, 0xB4, 0x21, 0x74, 0xB1, 0xF4,
+    0x2C, 0x78, 0xF8, 0xBC, 0x7C, 0x28, 0xB8, 0xFC, 0x2A, 0x2E, 0xBA, 0xBE, 0x7A, 0x7E, 0xFA, 0xFE,
+    0x25, 0x70, 0xF0, 0xB5, 0x75, 0x20, 0xB0, 0xF5, 0x22, 0x27, 0xB2, 0xB7, 0x72, 0x77, 0xF2, 0xF7,
+    0x2D, 0x79, 0xF9, 0xBD, 0x7D, 0x29, 0xB9, 0xFD, 0x2B, 0x2F, 0xBB, 0xBF, 0x7B, 0x7F, 0xFB, 0xFF]"
+
+definition sbox8 :: "byte \<Rightarrow> byte" where
+  "sbox8 x = (of_nat (sbox8_table ! unat x) :: 8 word)"
+
+definition sbox8_inv :: "byte \<Rightarrow> byte" where
+  "sbox8_inv x = (of_nat (sbox8_inv_table ! unat x) :: 8 word)"
+
+(* Generic S-box selection *)
+fun select_sbox :: "block_size \<Rightarrow> ('a::len word \<Rightarrow> 'a::len word)" where
+  "select_sbox BS_64 = (\<lambda>x. ucast (sbox4 (ucast x :: nibble)) :: 'a word)"
+| "select_sbox BS_128 = (\<lambda>x. ucast (sbox8 (ucast x :: byte)) :: 'a word)"
+
+fun select_sbox_inv :: "block_size \<Rightarrow> ('a::len word \<Rightarrow> 'a::len word)" where
+  "select_sbox_inv BS_64 = (\<lambda>x. ucast (sbox4_inv (ucast x :: nibble)) :: 'a word)"
+| "select_sbox_inv BS_128 = (\<lambda>x. ucast (sbox8_inv (ucast x :: byte)) :: 'a word)"
+
+subsection \<open>Round Constants\<close>
+
+definition round_constants :: "nat list" where
+  "round_constants = [
+    0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3E, 0x3D, 0x3B, 0x37, 0x2F, 0x1E, 0x3C, 0x39, 0x33,
+    0x27, 0x0E, 0x1D, 0x3A, 0x35, 0x2B, 0x16, 0x2C, 0x18, 0x30, 0x21, 0x02, 0x05, 0x0B,
+    0x17, 0x2E, 0x1C, 0x38, 0x31, 0x23, 0x06, 0x0D, 0x1B, 0x36, 0x2D, 0x1A, 0x34, 0x29,
+    0x12, 0x24, 0x08, 0x11, 0x22, 0x04, 0x09, 0x13, 0x26, 0x0C, 0x19, 0x32, 0x25, 0x0A,
+    0x15, 0x2A, 0x14, 0x28, 0x10, 0x20]"
+
+fun get_round_constant :: "nat \<Rightarrow> byte" where
+  "get_round_constant r = (if r < length round_constants then 
+                           of_nat (round_constants ! r) else 0)"
+
+subsection \<open>State Operations\<close>
+
+(* Apply S-box to entire state *)
+fun sub_cells :: "block_size \<Rightarrow> 'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "sub_cells bs (State4x4 (r0c0, r0c1, r0c2, r0c3) 
+                        (r1c0, r1c1, r1c2, r1c3)
+                        (r2c0, r2c1, r2c2, r2c3)
+                        (r3c0, r3c1, r3c2, r3c3)) =
+    State4x4 (select_sbox bs r0c0, select_sbox bs r0c1, select_sbox bs r0c2, select_sbox bs r0c3)
+             (select_sbox bs r1c0, select_sbox bs r1c1, select_sbox bs r1c2, select_sbox bs r1c3)
+             (select_sbox bs r2c0, select_sbox bs r2c1, select_sbox bs r2c2, select_sbox bs r2c3)
+             (select_sbox bs r3c0, select_sbox bs r3c1, select_sbox bs r3c2, select_sbox bs r3c3)"
+
+(* Inverse S-box application *)
+fun sub_cells_inv :: "block_size \<Rightarrow> 'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "sub_cells_inv bs (State4x4 (r0c0, r0c1, r0c2, r0c3) 
+                            (r1c0, r1c1, r1c2, r1c3)
+                            (r2c0, r2c1, r2c2, r2c3)
+                            (r3c0, r3c1, r3c2, r3c3)) =
+    State4x4 (select_sbox_inv bs r0c0, select_sbox_inv bs r0c1, 
+              select_sbox_inv bs r0c2, select_sbox_inv bs r0c3)
+             (select_sbox_inv bs r1c0, select_sbox_inv bs r1c1, 
+              select_sbox_inv bs r1c2, select_sbox_inv bs r1c3)
+             (select_sbox_inv bs r2c0, select_sbox_inv bs r2c1, 
+              select_sbox_inv bs r2c2, select_sbox_inv bs r2c3)
+             (select_sbox_inv bs r3c0, select_sbox_inv bs r3c1, 
+              select_sbox_inv bs r3c2, select_sbox_inv bs r3c3)"
+
+(* Shift Rows operation *)
+fun shift_rows :: "'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "shift_rows (State4x4 r0 r1 r2 r3) =
+    State4x4 r0
+             (case r1 of (a,b,c,d) \<Rightarrow> (d,a,b,c))
+             (case r2 of (a,b,c,d) \<Rightarrow> (c,d,a,b))
+             (case r3 of (a,b,c,d) \<Rightarrow> (b,c,d,a))"
+
+(* Inverse Shift Rows *)
+fun shift_rows_inv :: "'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "shift_rows_inv (State4x4 r0 r1 r2 r3) =
+    State4x4 r0
+             (case r1 of (a,b,c,d) \<Rightarrow> (b,c,d,a))
+             (case r2 of (a,b,c,d) \<Rightarrow> (c,d,a,b))
+             (case r3 of (a,b,c,d) \<Rightarrow> (d,a,b,c))"
+
+(* Mix Columns operation *)
+fun mix_columns :: "'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "mix_columns (State4x4 (a00, a01, a02, a03)
+                        (a10, a11, a12, a13)
+                        (a20, a21, a22, a23)
+                        (a30, a31, a32, a33)) =
+    let
+      mix1 = (a10 \<oplus> a20, a11 \<oplus> a21, a12 \<oplus> a22, a13 \<oplus> a23);
+      mix2 = (a00 \<oplus> a20, a01 \<oplus> a21, a02 \<oplus> a22, a03 \<oplus> a23);
+      mix3 = (a30 \<oplus> mix2)
+    in
+      State4x4 mix3 (a00, a01, a02, a03) mix1 mix2"
+
+(* Inverse Mix Columns *)
+fun mix_columns_inv :: "'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "mix_columns_inv (State4x4 (a00, a01, a02, a03)
+                            (a10, a11, a12, a13)
+                            (a20, a21, a22, a23)
+                            (a30, a31, a32, a33)) =
+    let
+      mix1 = (a00 \<oplus> a30, a01 \<oplus> a31, a02 \<oplus> a32, a03 \<oplus> a33);
+      mix2 = (a10 \<oplus> a30, a11 \<oplus> a31, a12 \<oplus> a32, a13 \<oplus> a33);
+      mix3 = (a20 \<oplus> mix2)
+    in
+      State4x4 (a10, a11, a12, a13) mix3 mix2 mix1"
+
+subsection \<open>Add Round Constants\<close>
+
+(* Add round constant to state *)
+fun add_round_constant :: "nat \<Rightarrow> 'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "add_round_constant rnd (State4x4 (a00, a01, a02, a03)
+                                   (a10, a11, a12, a13)
+                                   (a20, a21, a22, a23)
+                                   (a30, a31, a32, a33)) =
+    let
+      rc = get_round_constant rnd;
+      c0 = rc AND 0xF;
+      c1 = (rc >> 4) AND 0xF;
+      c2 = 0x2
+    in
+      State4x4 ((a00 \<oplus> c0), a01, a02, a03)
+               ((a10 \<oplus> c1), a11, a12, a13)
+               ((a20 \<oplus> c2), a21, a22, a23)
+               (a30, a31, a32, a33)"
+
+subsection \<open>Round Key Operations\<close>
+
+(* Type for round keys - just two rows *)
+type_synonym round_key = "('a \<times> 'a \<times> 'a \<times> 'a) \<times> ('a \<times> 'a \<times> 'a \<times> 'a)"
+
+(* Add round key to state *)
+fun add_round_key :: "round_key \<Rightarrow> 'a skinny_state \<Rightarrow> 'a skinny_state" where
+  "add_round_key ((k00, k01, k02, k03), (k10, k11, k12, k13))
+                 (State4x4 (a00, a01, a02, a03)
+                          (a10, a11, a12, a13)
+                          (a20, a21, a22, a23)
+                          (a30, a31, a32, a33)) =
+    State4x4 (a00 \<oplus> k00, a01 \<oplus> k01, a02 \<oplus> k02, a03 \<oplus> k03)
+             (a10 \<oplus> k10, a11 \<oplus> k11, a12 \<oplus> k12, a13 \<oplus> k13)
+             (a20, a21, a22, a23)
+             (a30, a31, a32, a33)"
+
+subsection \<open>Complete Round Function\<close>
+
+(* One encryption round *)
+fun skinny_encrypt_round :: "block_size \<Rightarrow> 'a skinny_state \<Rightarrow> round_key \<Rightarrow> nat \<Rightarrow> 'a skinny_state" where
+  "skinny_encrypt_round bs state rkey rnd =
+    let
+      state1 = sub_cells bs state;
+      state2 = add_round_constant rnd state1;
+      state3 = add_round_key rkey state2;
+      state4 = shift_rows state3;
+      state5 = mix_columns state4
+    in
+      state5"
+
+(* One decryption round *)
+fun skinny_decrypt_round :: "block_size \<Rightarrow> 'a skinny_state \<Rightarrow> round_key \<Rightarrow> nat \<Rightarrow> 'a skinny_state" where
+  "skinny_decrypt_round bs state rkey rnd =
+    let
+      state1 = mix_columns_inv state;
+      state2 = shift_rows_inv state1;
+      state3 = add_round_key rkey state2;
+      state4 = add_round_constant rnd state3;
+      state5 = sub_cells_inv bs state4
+    in
+      state5"
+
+subsection \<open>Key Schedule (simplified for now)\<close>
+
+(* TODO: Implement full tweakey schedule *)
+type_synonym key_schedule = "round_key list"
+
+(* Mock key schedule for testing *)
+definition dummy_key_schedule :: "block_size \<Rightarrow> key_size \<Rightarrow> key_schedule" where
+  "dummy_key_schedule bs ks = 
+    map (\<lambda>i. ((of_nat i, 0, 0, 0), (0, 0, 0, 0))) [0..<num_rounds bs ks]"
+
+subsection \<open>Main Encryption/Decryption Functions\<close>
+
+(* Full encryption *)
+fun skinny_encrypt :: "block_size \<Rightarrow> key_size \<Rightarrow> 'a skinny_state \<Rightarrow> key_schedule \<Rightarrow> 'a skinny_state" where
+  "skinny_encrypt bs ks state [] = state"
+| "skinny_encrypt bs ks state (rkey#rkeys) =
+    skinny_encrypt bs ks (skinny_encrypt_round bs state rkey (length rkeys)) rkeys"
+
+(* Full decryption *)
+fun skinny_decrypt :: "block_size \<Rightarrow> key_size \<Rightarrow> 'a skinny_state \<Rightarrow> key_schedule \<Rightarrow> 'a skinny_state" where
+  "skinny_decrypt bs ks state [] = state"
+| "skinny_decrypt bs ks state (rkey#rkeys) =
+    skinny_decrypt bs ks (skinny_decrypt_round bs state rkey (num_rounds bs ks - length rkeys - 1)) rkeys"
+
+subsection \<open>Inverse Properties\<close>
+
+(* S-box inverse property *)
+lemma sbox4_inverse:
+  "sbox4_inv (sbox4 x) = x"
+  sorry  (* To be proven with table verification *)
+
+lemma sbox8_inverse:
+  "sbox8_inv (sbox8 x) = x"
+  sorry  (* To be proven with table verification *)
+
+(* State operation inverses *)
+lemma shift_rows_inverse:
+  "shift_rows_inv (shift_rows s) = s"
+  by (cases s) auto
+
+lemma shift_rows_inverse_rev:
+  "shift_rows (shift_rows_inv s) = s"
+  by (cases s) auto
+
+lemma mix_columns_inverse:
+  "mix_columns_inv (mix_columns s) = s"
+  sorry  (* To be proven algebraically *)
+
+lemma mix_columns_inverse_rev:
+  "mix_columns (mix_columns_inv s) = s"
+  sorry  (* To be proven algebraically *)
+
+(* Round inverse property *)
+theorem round_inverse:
+  assumes "rnd < num_rounds bs ks"
+  shows "skinny_decrypt_round bs (skinny_encrypt_round bs s rkey rnd) rkey rnd = s"
+  sorry  (* Main correctness proof *)
+
+(* Full encryption/decryption inverse *)
+theorem skinny_correctness:
+  assumes "length sched = num_rounds bs ks"
+  shows "skinny_decrypt bs ks (skinny_encrypt bs ks pt sched) (rev sched) = pt"
+  sorry  (* Main theorem *)
+
+subsection \<open>Test Vectors Support\<close>
+
+(* Helper to convert integer to state *)
+definition int_to_state :: "block_size \<Rightarrow> nat \<Rightarrow> 'a skinny_state" where
+  "int_to_state bs n = 
+    State4x4 (of_nat ((n >> 60) AND 0xF), of_nat ((n >> 56) AND 0xF), 
+              of_nat ((n >> 52) AND 0xF), of_nat ((n >> 48) AND 0xF))
+             (of_nat ((n >> 44) AND 0xF), of_nat ((n >> 40) AND 0xF), 
+              of_nat ((n >> 36) AND 0xF), of_nat ((n >> 32) AND 0xF))
+             (of_nat ((n >> 28) AND 0xF), of_nat ((n >> 24) AND 0xF), 
+              of_nat ((n >> 20) AND 0xF), of_nat ((n >> 16) AND 0xF))
+             (of_nat ((n >> 12) AND 0xF), of_nat ((n >> 8) AND 0xF), 
+              of_nat ((n >> 4) AND 0xF), of_nat (n AND 0xF))"
+
+(* Test encryption function *)
+definition test_skinny_64_64 :: "nat \<Rightarrow> nat \<Rightarrow> nat" where
+  "test_skinny_64_64 key plaintext = 
+    (let state = int_to_state BS_64 plaintext;
+         sched = dummy_key_schedule BS_64 KS_64;
+         cipher = skinny_encrypt BS_64 KS_64 state sched
+     in 0)"  (* TODO: Implement proper conversion *)
+
+end

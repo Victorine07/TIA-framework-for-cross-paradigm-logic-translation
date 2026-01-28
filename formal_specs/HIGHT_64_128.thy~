@@ -1,0 +1,293 @@
+theory HIGHT_64_128
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations" 
+    "HOL.List"
+begin
+
+section \<open>HIGHT: generic definitions and key-schedule\<close>
+
+subsection \<open>Configuration parameters\<close>
+
+definition get_num_rounds :: "nat \<Rightarrow> nat \<Rightarrow> nat" where
+  "get_num_rounds block_size key_size =
+    (if block_size = 64 \<and> key_size = 128 then 32
+     else 0)"
+
+definition get_delta_array_index :: "nat \<Rightarrow> nat \<Rightarrow> nat" where
+  "get_delta_array_index block_size key_size =
+    (if block_size = 64 \<and> key_size = 128 then 0
+     else 0)"
+
+subsection \<open>Delta-sequences (7-bit)\<close>
+
+definition delta0 :: int where
+  "delta0 = 0b10101101"  (* Reverse of [0,1,0,1,1,0,1] *)
+
+definition get_delta_bit_val :: "nat \<Rightarrow> nat \<Rightarrow> bool" where
+  "get_delta_bit_val delta_idx i =
+     (if delta_idx = 0 then bit delta0 (i mod 7)
+      else False)"
+
+subsection \<open>Core operations\<close>
+
+
+definition list_to_byte :: "bool list \<Rightarrow> 8 word" where
+  "list_to_byte lst = of_int (foldl (\<lambda>byte bit.  (byte * 2) + (if bit then 1 else 0) ) 0 lst)"
+
+definition rotate_bits_left :: "'a::len word \<Rightarrow> nat \<Rightarrow> 'a::len word" where
+  "rotate_bits_left x n = word_rotl n x"
+
+definition F_function_0 :: "8 word \<Rightarrow> 8 word" where
+  "F_function_0 x = xor (xor (rotate_bits_left x 1) (rotate_bits_left x 2)) (rotate_bits_left x 7)"
+
+definition F_function_1 :: "8 word \<Rightarrow> 8 word" where  
+  "F_function_1 x = xor (xor (rotate_bits_left x 3) (rotate_bits_left x 4)) (rotate_bits_left x 6)"
+
+subsection \<open>Key schedule\<close>
+
+definition whitening_key_generation :: "8 word list \<Rightarrow> 8 word list" where
+  "whitening_key_generation MK = 
+    [MK ! 12, MK ! 13, MK ! 14, MK ! 15, MK ! 0, MK ! 1, MK ! 2, MK ! 3]"
+
+
+function constant_generation_rec :: "nat \<Rightarrow> bool list \<Rightarrow> 8 word list" where
+  "constant_generation_rec i current_s =
+    (if i \<ge> 128 then []
+     else
+       let delta_i = list_to_byte (rev (take 7 current_s)) in
+       delta_i # constant_generation_rec (i + 1) 
+         (current_s @ [((nth current_s (i + 2)) \<noteq> (nth current_s (i - 1)))]))"
+  by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(i, current_s). 128 - i)")
+  apply auto
+  done
+
+
+
+definition constant_generation :: "8 word list" where
+  "constant_generation = constant_generation_rec 0 [False, True, False, True, True, False, True]"
+
+function subkey_generation_rec :: "nat \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "subkey_generation_rec i delta MK =
+    (if i \<ge> 8 then []
+     else
+       let sk_first = map (\<lambda>j. (MK ! ((j - i) mod 8) + delta ! (16 * i + j)) mod 256) [0..<8] in
+       let sk_second = map (\<lambda>j. (MK ! ((j - i) mod 8 + 8) + delta ! (16 * i + j + 8)) mod 256) [0..<8] in
+       sk_first @ sk_second @ subkey_generation_rec (i + 1) delta MK)"
+  by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(i, delta, MK). 8 - i)")
+  apply auto
+  done
+
+definition subkey_generation :: "8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "subkey_generation delta MK = subkey_generation_rec 0 delta MK"
+
+definition generate_key_schedule_enc :: "nat \<Rightarrow> nat \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<times> 8 word list" where
+  "generate_key_schedule_enc block_size key_size initial_keys_list =
+     (let delta = constant_generation;
+          WK = whitening_key_generation initial_keys_list;
+          SK = subkey_generation delta initial_keys_list
+      in (WK, SK))"
+
+definition generate_key_schedule_dec :: "nat \<Rightarrow> nat \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<times> 8 word list" where
+  "generate_key_schedule_dec block_size key_size initial_keys_list =
+     (let delta = constant_generation;
+          WK = whitening_key_generation initial_keys_list;
+          SK = rev (subkey_generation delta initial_keys_list)
+      in (WK, SK))"
+
+subsection \<open>Round transformations\<close>
+
+definition encryption_initial_transformation :: "8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "encryption_initial_transformation P WK =
+    [(P ! 0 + WK ! 0) mod 256,
+     P ! 1,
+     xor (P ! 2) (WK ! 1),
+     P ! 3,
+     (P ! 4 + WK ! 2) mod 256,
+     P ! 5,
+     xor (P ! 6) (WK ! 3),
+     P ! 7]"
+
+definition decryption_initial_transformation :: "8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "decryption_initial_transformation C WK =
+    [C ! 7,
+     (C ! 0 - WK ! 4) mod 256,
+     C ! 1,
+     xor (C ! 2) (WK ! 5),
+     C ! 3,
+     (C ! 4 - WK ! 6) mod 256,
+     C ! 5,
+     xor (C ! 6) (WK ! 7)]"
+
+definition encryption_final_transformation :: "8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "encryption_final_transformation X_32 WK =
+    [(X_32 ! 1 + WK ! 4) mod 256,
+     X_32 ! 2,
+     xor (X_32 ! 3) (WK ! 5),
+     X_32 ! 4,
+     (X_32 ! 5 + WK ! 6) mod 256,
+     X_32 ! 6,
+     xor (X_32 ! 7) (WK ! 7),
+     X_32 ! 0]"
+
+definition decryption_final_transformation :: "8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "decryption_final_transformation X_32 WK =
+    [(X_32 ! 0 - WK ! 0) mod 256,
+     X_32 ! 1,
+     xor (X_32 ! 2) (WK ! 1),
+     X_32 ! 3,
+     (X_32 ! 4 - WK ! 2) mod 256,
+     X_32 ! 5,
+     xor (X_32 ! 6) (WK ! 3),
+     X_32 ! 7]"
+
+subsection \<open>Round functions\<close>
+
+definition hight_encryption_round :: "nat \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "hight_encryption_round i X_i SK =
+    [xor (X_i ! 7) ((F_function_0 (X_i ! 6) + SK ! (4 * i + 3)) mod 256),
+     X_i ! 0,
+     (X_i ! 1 + (xor (F_function_1 (X_i ! 0)) (SK ! (4 * i)))) mod 256,
+     X_i ! 2,
+     xor (X_i ! 3) ((F_function_0 (X_i ! 2) + SK ! (4 * i + 1)) mod 256),
+     X_i ! 4,
+     (X_i ! 5 + (xor (F_function_1 (X_i ! 4)) (SK ! (4 * i + 2)))) mod 256,
+     X_i ! 6]"
+
+definition hight_decryption_round :: "nat \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "hight_decryption_round i X_i SK =
+    [X_i ! 1,
+     (X_i ! 2 - (xor (F_function_1 (X_i ! 1)) (SK ! (4 * i + 3)))) mod 256,
+     X_i ! 3,
+     xor (X_i ! 4) ((F_function_0 (X_i ! 3) + SK ! (4 * i + 2)) mod 256),
+     X_i ! 5,
+     (X_i ! 6 - (xor (F_function_1 (X_i ! 5)) (SK ! (4 * i + 1)))) mod 256,
+     X_i ! 7,
+     xor (X_i ! 0) ((F_function_0 (X_i ! 7) + SK ! (4 * i)) mod 256)]"
+
+subsection \<open>Encryption and decryption iteration\<close>
+
+function encrypt_iterate :: "8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<Rightarrow> nat \<Rightarrow> 8 word list" where
+  "encrypt_iterate X_i WK SK i =
+    (if i \<ge> 32 then encryption_final_transformation X_i WK
+     else encrypt_iterate (hight_encryption_round i X_i SK) WK SK (i + 1))"
+  by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(X_i, WK, SK, i). 32 - i)")
+  apply auto
+  done
+
+function decrypt_iterate :: "8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<Rightarrow> nat \<Rightarrow> 8 word list" where
+  "decrypt_iterate X_i WK SK i =
+    (if i \<ge> 32 then decryption_final_transformation X_i WK
+     else decrypt_iterate (hight_decryption_round i X_i SK) WK SK (i + 1))"
+  by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(X_i, WK, SK, i). 32 - i)")
+  apply auto
+  done
+
+definition encrypt_block :: "nat \<Rightarrow> nat \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "encrypt_block block_size key_size P initial_keys_list =
+    (let (WK, SK) = generate_key_schedule_enc block_size key_size initial_keys_list;
+         X_0 = encryption_initial_transformation P WK
+     in encrypt_iterate X_0 WK SK 0)"
+
+definition decrypt_block :: "nat \<Rightarrow> nat \<Rightarrow> 8 word list \<Rightarrow> 8 word list \<Rightarrow> 8 word list" where
+  "decrypt_block block_size key_size C initial_keys_list =
+    (let (WK, SK) = generate_key_schedule_dec block_size key_size initial_keys_list;
+         X_0 = decryption_initial_transformation C WK
+     in decrypt_iterate X_0 WK SK 0)"
+
+subsection \<open>Invertibility lemmas\<close>
+
+subsection \<open>Round function invertibility lemmas\<close>
+
+section \<open>Instantiation: HIGHT 64/128 (specialization)\<close>
+
+(* All parameters are derived from block_size and key_size only *)
+definition block_size_64_128 :: nat where "block_size_64_128 = 64"
+definition key_size_64_128 :: nat where "key_size_64_128 = 128" 
+definition word_size_64_128 :: nat where "word_size_64_128 = 8"
+definition num_rounds_64_128 :: nat where "num_rounds_64_128 = get_num_rounds block_size_64_128 key_size_64_128"
+
+type_synonym word_64_128 = "8 word"
+type_synonym key_schedule_64_128 = "word_64_128 list"
+type_synonym state_64_128 = "word_64_128 list"
+
+definition encrypt :: "state_64_128 \<Rightarrow> key_schedule_64_128 \<Rightarrow> state_64_128" where
+  "encrypt plaintext initial_keys = 
+     encrypt_block block_size_64_128 key_size_64_128 plaintext initial_keys"
+
+definition decrypt :: "state_64_128 \<Rightarrow> key_schedule_64_128 \<Rightarrow> state_64_128" where
+  "decrypt ciphertext initial_keys = 
+     decrypt_block block_size_64_128 key_size_64_128 ciphertext initial_keys"
+
+definition generate_key_schedule_enc_64_128 :: "word_64_128 list \<Rightarrow> word_64_128 list \<times> word_64_128 list" where
+  "generate_key_schedule_enc_64_128 initial_keys_list = 
+     generate_key_schedule_enc block_size_64_128 key_size_64_128 initial_keys_list"
+
+definition generate_key_schedule_dec_64_128 :: "word_64_128 list \<Rightarrow> word_64_128 list \<times> word_64_128 list" where
+  "generate_key_schedule_dec_64_128 initial_keys_list = 
+     generate_key_schedule_dec block_size_64_128 key_size_64_128 initial_keys_list"
+
+subsection \<open>Invertibility lemmas specialized to 64/128\<close>
+
+
+
+lemma encrypt_decrypt_inverse_64_128:
+  fixes P :: "state_64_128"
+  fixes MK :: "key_schedule_64_128"
+  assumes "length P = 8" "length MK = 16"
+  shows "decrypt (encrypt P MK) MK = P"
+  using assms
+  unfolding encrypt_def decrypt_def
+            encrypt_block_def decrypt_block_def
+            generate_key_schedule_enc_64_128_def generate_key_schedule_dec_64_128_def
+  apply (simp add: Let_def whitening_key_generation_def subkey_generation_def
+                  encryption_initial_transformation_def decryption_final_transformation_def)
+  (* The actual round function cancellation would need separate lemmas *)
+  sorry
+
+lemma decrypt_encrypt_inverse_64_128:
+  fixes C :: "state_64_128" 
+  fixes MK :: "key_schedule_64_128"
+  assumes "length C = 8" "length MK = 16"
+  shows "encrypt (decrypt C MK) MK = C"
+  using assms
+  unfolding encrypt_def decrypt_def
+            encrypt_block_def decrypt_block_def
+            generate_key_schedule_enc_64_128_def generate_key_schedule_dec_64_128_def
+  apply (simp add: Let_def whitening_key_generation_def subkey_generation_def
+                  decryption_initial_transformation_def encryption_final_transformation_def)
+  (* The actual round function cancellation would need separate lemmas *)
+  sorry
+
+
+subsection \<open>Test vectors\<close>
+
+definition test_MK_64_128 :: "key_schedule_64_128" where
+  "test_MK_64_128 = map of_int [0x88, 0xE3, 0x4F, 0x8F, 0x08, 0x17, 0x79, 0xF1, 
+                                0xE9, 0xF3, 0x94, 0x37, 0x0A, 0xD4, 0x05, 0x89]"
+
+definition test_P_64_128 :: "state_64_128" where
+  "test_P_64_128 = map of_int [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]"
+
+definition expected_C_64_128 :: "state_64_128" where
+  "expected_C_64_128 = map of_int [0xCE, 0x15, 0x95, 0x08, 0x5A, 0x18, 0x8C, 0x28]"
+
+(* Test that encryption produces expected ciphertext *)
+lemma test_encryption_64_128:
+  "encrypt test_P_64_128 test_MK_64_128 = expected_C_64_128"
+  sorry
+
+(* Test that decryption recovers plaintext *)  
+lemma test_decryption_64_128:
+  "decrypt expected_C_64_128 test_MK_64_128 = test_P_64_128"
+  sorry
+
+end

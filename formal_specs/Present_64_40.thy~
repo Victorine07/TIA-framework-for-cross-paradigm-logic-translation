@@ -1,0 +1,154 @@
+theory Present_64_40
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+
+definition ENCRYPTION_ROUNDS :: nat where
+  "ENCRYPTION_ROUNDS = 32"
+
+
+definition KEY_SCHEDULE_ROUNDS :: nat where
+  "KEY_SCHEDULE_ROUNDS = 9"  (* 40-bit key generates only 9 round keys *)
+
+
+definition present_64_40_sbox_table :: "nat list" where
+  "present_64_40_sbox_table = 
+    [0xC, 0x5, 0x6, 0xB, 0x9, 0x0, 0xA, 0xD, 
+     0x3, 0xE, 0xF, 0x8, 0x4, 0x7, 0x1, 0x2]"
+
+
+definition present_64_40_sbox_inv_table :: "nat list" where
+  "present_64_40_sbox_inv_table = 
+    [0x5, 0xE, 0xF, 0x8, 0xC, 0x1, 0x2, 0xD,
+     0xB, 0x4, 0x6, 0x3, 0x0, 0x7, 0x9, 0xA]"
+
+
+definition present_64_40_sbox :: "4 word ⇒ 4 word" where
+  "present_64_40_sbox x = of_nat (present_64_40_sbox_table ! unat x)"
+
+
+definition present_64_40_sbox_inverse :: "4 word ⇒ 4 word" where
+  "present_64_40_sbox_inverse x = of_nat (present_64_40_sbox_inv_table ! unat x)"
+
+
+definition present_64_40_sbox_layer :: "64 word ⇒ 64 word" where
+  "present_64_40_sbox_layer s = 
+    word_of_int (∑i < 16. 
+      uint (present_64_40_sbox (word_of_int ((uint s div 2^(4*i)) mod 16))) * 2^(4*i))"
+
+
+definition present_64_40_sbox_layer_inverse :: "64 word ⇒ 64 word" where
+  "present_64_40_sbox_layer_inverse s = 
+    word_of_int (∑i < 16. 
+      uint (present_64_40_sbox_inverse (word_of_int ((uint s div 2^(4*i)) mod 16))) * 2^(4*i))"
+
+
+definition present_64_40_p_layer_order :: "nat list" where
+  "present_64_40_p_layer_order = 
+    [0, 16, 32, 48, 1, 17, 33, 49, 2, 18, 34, 50, 3, 19, 35, 51,
+     4, 20, 36, 52, 5, 21, 37, 53, 6, 22, 38, 54, 7, 23, 39, 55,
+     8, 24, 40, 56, 9, 25, 41, 57, 10, 26, 42, 58, 11, 27, 43, 59,
+     12, 28, 44, 60, 13, 29, 45, 61, 14, 30, 46, 62, 15, 31, 47, 63]"
+
+
+definition present_64_40_p_layer_inv_order :: "nat list" where
+  "present_64_40_p_layer_inv_order = 
+    [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
+     1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, 53, 57, 61,
+     2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50, 54, 58, 62,
+     3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63]"
+
+
+definition present_64_40_p_layer :: "64 word ⇒ 64 word" where
+  "present_64_40_p_layer s = 
+    word_of_int (∑ i<64. 
+      if bit s i then 2 ^ (present_64_40_p_layer_order ! i) else 0)"
+
+
+definition present_64_40_p_layer_inverse :: "64 word ⇒ 64 word" where
+  "present_64_40_p_layer_inverse s = 
+    word_of_int (∑ i<64. 
+      if bit s i then 2 ^ (present_64_40_p_layer_inv_order ! i) else 0)"
+
+
+definition present_64_40_encrypt_round :: "64 word ⇒ 64 word ⇒ 64 word" where
+  "present_64_40_encrypt_round round_key state = 
+    present_64_40_p_layer (present_64_40_sbox_layer (xor state round_key))"
+
+
+definition present_64_40_decrypt_round_inverse :: "64 word ⇒ 64 word ⇒ 64 word" where
+  "present_64_40_decrypt_round_inverse round_key state = 
+    xor (present_64_40_sbox_layer_inverse (present_64_40_p_layer_inverse state)) round_key"
+
+
+definition present_64_40_word_slice :: "nat ⇒ nat ⇒ 'a::len word ⇒ 'b::len word" where
+  "present_64_40_word_slice start len w = 
+    word_of_int ((uint w div 2^start) mod 2^len)"
+
+
+definition present_64_40_key_update :: "40 word ⇒ nat ⇒ 40 word" where
+  "present_64_40_key_update k r_count = (
+    let k_rot = word_rotl 21 k;                   
+        sbox_in = (present_64_40_word_slice 36 4 k_rot :: 4 word); 
+        sbox_out = present_64_40_sbox sbox_in;
+        k_sboxed = or (and k_rot (mask 36)) (push_bit 36 (ucast sbox_out));
+        xor_in = (present_64_40_word_slice 15 5 k_sboxed :: 5 word);  
+        xor_out = xor xor_in (of_nat r_count);
+        mask_15_19 = not (push_bit 15 (mask 5 :: 40 word));
+        k_final = or (and k_sboxed mask_15_19) (push_bit 15 (ucast xor_out))
+    in k_final)"
+
+
+fun present_64_40_build_keys :: "40 word ⇒ nat ⇒ 64 word list" where
+  "present_64_40_build_keys key 0 = []"
+| "present_64_40_build_keys key (Suc n) = 
+    (ucast key :: 64 word) # 
+    present_64_40_build_keys (present_64_40_key_update key (KEY_SCHEDULE_ROUNDS - n)) n"
+
+
+definition present_64_40_generate_key_schedule :: "40 word ⇒ 64 word list" where
+  "present_64_40_generate_key_schedule initial_key = 
+    present_64_40_build_keys initial_key KEY_SCHEDULE_ROUNDS"
+
+
+fun present_64_40_encrypt_iterate :: "64 word ⇒ 64 word list ⇒ nat ⇒ 64 word" where
+  "present_64_40_encrypt_iterate state [] _ = state"
+| "present_64_40_encrypt_iterate state (k#ks) rounds_left = 
+     (if rounds_left = 1 then xor state k 
+      else present_64_40_encrypt_iterate (present_64_40_encrypt_round k state) ks (rounds_left - 1))"
+
+
+fun present_64_40_decrypt_iterate :: "64 word ⇒ 64 word list ⇒ nat ⇒ 64 word" where
+  "present_64_40_decrypt_iterate state [] _ = state"
+| "present_64_40_decrypt_iterate state (k#ks) rounds_left = 
+     (if rounds_left = 1 then xor state k 
+      else present_64_40_decrypt_iterate (present_64_40_decrypt_round_inverse k state) ks (rounds_left - 1))"
+
+
+
+definition present_64_40_encrypt_block :: "64 word ⇒ 64 word list ⇒ 64 word" where
+  "present_64_40_encrypt_block state keys = 
+    present_64_40_encrypt_iterate state keys ENCRYPTION_ROUNDS"
+
+
+definition present_64_40_decrypt_block :: "64 word ⇒ 64 word list ⇒ 64 word" where
+  "present_64_40_decrypt_block state keys = 
+    present_64_40_decrypt_iterate state (rev keys) ENCRYPTION_ROUNDS"
+
+
+definition present_64_40_encrypt :: "64 word ⇒ 40 word ⇒ 64 word" where
+  "present_64_40_encrypt plaintext key = (
+    let keys = present_64_40_generate_key_schedule key
+    in present_64_40_encrypt_block plaintext keys)"
+
+
+definition present_64_40_decrypt :: "64 word ⇒ 40 word ⇒ 64 word" where
+  "present_64_40_decrypt ciphertext key = (
+    let keys = present_64_40_generate_key_schedule key
+    in present_64_40_decrypt_block ciphertext keys)"
+
+
+
+end

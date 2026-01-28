@@ -1,0 +1,169 @@
+theory lea_128_128_2
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+section \<open>LEA-128/128: Core Definitions\<close>
+
+text \<open>
+  LEA-128 configuration:
+  - Block size: 128 bits
+  - Key size: 128 bits
+  - Word size: 32 bits
+  - Number of rounds: 24
+\<close>
+
+definition lea_128_128_block_size :: nat where "lea_128_128_block_size = 128"
+definition lea_128_128_key_size   :: nat where "lea_128_128_key_size = 128"
+definition lea_128_128_word_size  :: nat where "lea_128_128_word_size = 32"
+definition lea_128_128_n_words    :: nat where "lea_128_128_n_words = 4"
+definition lea_128_128_rounds     :: nat where "lea_128_128_rounds = 24"
+
+subsection \<open>Rotation Functions\<close>
+
+definition lea_rol :: "'a::len word \<Rightarrow> nat \<Rightarrow> 'a word" where
+  "lea_rol x r = word_rotl r x"
+
+definition lea_ror :: "'a::len word \<Rightarrow> nat \<Rightarrow> 'a word" where
+  "lea_ror x r = word_rotr r x"
+
+subsection \<open>Round Constants\<close>
+
+text \<open>Delta constants as defined in the LEA specification\<close>
+
+definition lea_delta :: "32 word list" where
+  "lea_delta =
+    [ 0x9E3779B9,
+      0x3C6EF373,
+      0x78DDE6E6,
+      0xF1BBCDCC,
+      0xE3779B99,
+      0xC6EF3733,
+      0x8DDE6E67,
+      0x1BBCDCCF ]"
+
+subsection \<open>Key Schedule\<close>
+
+definition lea_128_128_extract_key_words :: "128 word \<Rightarrow> 32 word list" where
+  "lea_128_128_extract_key_words k =
+    [ ucast k,
+      ucast (drop_bit 32 k),
+      ucast (drop_bit 64 k),
+      ucast (drop_bit 96 k) ]"
+
+definition lea_128_128_round_key ::
+  "32 word list \<Rightarrow> nat \<Rightarrow> 32 word list" where
+  "lea_128_128_round_key t i =
+    (let d = lea_delta ! (i mod 8);
+         t0 = lea_rol (t ! 0 + d) 1;
+         t1 = lea_rol (t ! 1 + d) 3;
+         t2 = lea_rol (t ! 2 + d) 6;
+         t3 = lea_rol (t ! 3 + d) 11
+     in [t0, t1, t2, t3])"
+
+function lea_128_128_gen_round_keys_iter ::
+  "32 word list \<Rightarrow> nat \<Rightarrow> 32 word list list \<Rightarrow> 32 word list list" where
+  "lea_128_128_gen_round_keys_iter t i acc =
+    (if i \<ge> lea_128_128_rounds then acc
+     else
+       let rk = lea_128_128_round_key t i
+       in lea_128_128_gen_round_keys_iter rk (i + 1) (acc @ [rk]))"
+  by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(_, i, _). lea_128_128_rounds - i)")
+  apply auto
+  done
+
+definition lea_128_128_generate_round_keys :: "128 word \<Rightarrow> 32 word list list" where
+  "lea_128_128_generate_round_keys k =
+    lea_128_128_gen_round_keys_iter (lea_128_128_extract_key_words k) 0 []"
+
+subsection \<open>Round Function\<close>
+
+definition lea_128_128_encrypt_round ::
+  "32 word list \<Rightarrow> 32 word list \<Rightarrow> 32 word list" where
+  "lea_128_128_encrypt_round state rk =
+    (if length state = 4 \<and> length rk = 4 then
+       let x0 = state ! 0;
+           x1 = state ! 1;
+           x2 = state ! 2;
+           x3 = state ! 3;
+           k0 = rk ! 0;
+           k1 = rk ! 1;
+           k2 = rk ! 2;
+           k3 = rk ! 3;
+           y0 = lea_rol ((x0 xor k0) + (x1 xor k1)) 9;
+           y1 = lea_ror ((x1 xor k1) + (x2 xor k2)) 5;
+           y2 = lea_ror ((x2 xor k2) + (x3 xor k3)) 3;
+           y3 = x0
+       in [y0, y1, y2, y3]
+     else state)"
+
+definition lea_128_128_decrypt_round ::
+  "32 word list \<Rightarrow> 32 word list \<Rightarrow> 32 word list" where
+  "lea_128_128_decrypt_round state rk =
+    (if length state = 4 \<and> length rk = 4 then
+       let y0 = state ! 0;
+           y1 = state ! 1;
+           y2 = state ! 2;
+           y3 = state ! 3;
+           k0 = rk ! 0;
+           k1 = rk ! 1;
+           k2 = rk ! 2;
+           k3 = rk ! 3;
+           x0 = y3;
+           x1 = xor (lea_ror y0 9 - (x0 xor k0)) k1;
+           x2 = xor (lea_rol y1 5 - (x1 xor k1)) k2;
+           x3 = xor (lea_rol y2 3 - (x2 xor k2)) k3
+       in [x0, x1, x2, x3]
+     else state)"
+
+subsection \<open>Round Iteration\<close>
+
+fun lea_128_128_encrypt_iter ::
+  "32 word list \<Rightarrow> 32 word list list \<Rightarrow> 32 word list" where
+  "lea_128_128_encrypt_iter state [] = state"
+| "lea_128_128_encrypt_iter state (rk # rks) =
+     lea_128_128_encrypt_iter (lea_128_128_encrypt_round state rk) rks"
+
+fun lea_128_128_decrypt_iter ::
+  "32 word list \<Rightarrow> 32 word list list \<Rightarrow> 32 word list" where
+  "lea_128_128_decrypt_iter state rks =
+     foldl lea_128_128_decrypt_round state (rev rks)"
+
+subsection \<open>Block Conversion\<close>
+
+definition lea_128_128_block_to_words :: "128 word \<Rightarrow> 32 word list" where
+  "lea_128_128_block_to_words b =
+    [ ucast b,
+      ucast (drop_bit 32 b),
+      ucast (drop_bit 64 b),
+      ucast (drop_bit 96 b) ]"
+
+definition lea_128_128_words_to_block :: "32 word list \<Rightarrow> 128 word" where
+  "lea_128_128_words_to_block w =
+    (if length w = 4 then
+       or (push_bit 96 (ucast (w ! 3)))
+          (or (push_bit 64 (ucast (w ! 2)))
+              (or (push_bit 32 (ucast (w ! 1)))
+                  (ucast (w ! 0))))
+     else 0)"
+
+subsection \<open>Top-Level Encryption / Decryption\<close>
+
+definition lea_128_128_encrypt :: "128 word \<Rightarrow> 128 word \<Rightarrow> 128 word" where
+  "lea_128_128_encrypt plaintext key =
+    (let state = lea_128_128_block_to_words plaintext;
+         rks   = lea_128_128_generate_round_keys key;
+         out   = lea_128_128_encrypt_iter state rks
+     in lea_128_128_words_to_block out)"
+
+definition lea_128_128_decrypt :: "128 word \<Rightarrow> 128 word \<Rightarrow> 128 word" where
+  "lea_128_128_decrypt ciphertext key =
+    (let state = lea_128_128_block_to_words ciphertext;
+         rks   = lea_128_128_generate_round_keys key;
+         out   = lea_128_128_decrypt_iter state rks
+     in lea_128_128_words_to_block out)"
+
+end

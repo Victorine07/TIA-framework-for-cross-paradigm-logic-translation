@@ -1,0 +1,60 @@
+theory Simon_48_96
+  imports "HOL-Library.Word" "HOL.Bit_Operations"
+begin
+
+definition simon_48_96_z1 :: int where 
+  "simon_48_96_z1 = 0b01011010000110010011111011100010101101000011001001111101110001"
+
+
+definition simon_48_96_F_function :: "24 word ⇒ 24 word" where
+  "simon_48_96_F_function x = xor (and (word_rotl 1 x) (word_rotl 8 x)) (word_rotl 2 x)"
+
+
+definition simon_48_96_encrypt_round :: "24 word ⇒ 24 word × 24 word ⇒ 24 word × 24 word" where
+  "simon_48_96_encrypt_round k xy = (let (x, y) = xy in (xor (xor k (simon_48_96_F_function x)) y, x))"
+
+
+definition simon_48_96_decrypt_round_inverse :: "24 word ⇒ 24 word × 24 word ⇒ 24 word × 24 word" where
+  "simon_48_96_decrypt_round_inverse k xy_new = (let (x_new, y_new) = xy_new in (y_new, xor (xor x_new k) (simon_48_96_F_function y_new)))"
+
+
+definition simon_48_96_rho_const :: "24 word" where
+  "simon_48_96_rho_const = 0xFFFFFC"
+
+
+function simon_48_96_gen_key_schedule_rec :: "24 word list ⇒ nat ⇒ 24 word list" where
+  "simon_48_96_gen_key_schedule_rec ks i = (if i ≥ 36 then ks else
+    let z_bit = bit simon_48_96_z1 (i - 4);
+        rs_3 = word_rotr 3 (ks ! (i-1)); rs_1 = word_rotr 1 rs_3;
+        new_k = xor (xor (xor (ks ! (i-4)) rs_3) rs_1) (xor (if z_bit then 1 else 0) simon_48_96_rho_const)
+    in simon_48_96_gen_key_schedule_rec (ks @ [new_k]) (i+1))"
+  by pat_completeness auto
+termination by (relation "measure (λ(ks, i). 36 - i)") auto
+
+
+definition simon_48_96_generate_key_schedule :: "24 word list ⇒ 24 word list" where
+  "simon_48_96_generate_key_schedule init = simon_48_96_gen_key_schedule_rec init (length init)"
+
+
+fun simon_48_96_encrypt_iterate :: "24 word × 24 word ⇒ 24 word list ⇒ 24 word × 24 word" where
+  "simon_48_96_encrypt_iterate st [] = st" 
+| "simon_48_96_encrypt_iterate st (k#ks) = simon_48_96_encrypt_iterate (simon_48_96_encrypt_round k st) ks"
+
+
+fun simon_48_96_decrypt_iterate :: "24 word × 24 word ⇒ 24 word list ⇒ 24 word × 24 word" where
+  "simon_48_96_decrypt_iterate st ks = foldl (λst_new k. simon_48_96_decrypt_round_inverse k st_new) st (rev ks)"
+
+
+definition simon_48_96_encrypt_block :: "24 word × 24 word ⇒ 24 word list ⇒ 24 word × 24 word" where "simon_48_96_encrypt_block = simon_48_96_encrypt_iterate"
+
+
+definition simon_48_96_decrypt_block :: "24 word × 24 word ⇒ 24 word list ⇒ 24 word × 24 word" where "simon_48_96_decrypt_block = simon_48_96_decrypt_iterate"
+
+
+definition simon_48_96_encrypt :: "24 word × 24 word ⇒ 24 word list ⇒ 24 word × 24 word" where "simon_48_96_encrypt = simon_48_96_encrypt_block"
+
+
+definition simon_48_96_decrypt :: "24 word × 24 word ⇒ 24 word list ⇒ 24 word × 24 word" where "simon_48_96_decrypt = simon_48_96_decrypt_block"
+
+
+end

@@ -1,0 +1,215 @@
+theory rectangle_64_80
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+definition rectangle_64_80_rounds :: nat where 
+  "rectangle_64_80_rounds = 25"
+
+definition rectangle_64_80_block_size :: nat where 
+  "rectangle_64_80_block_size = 64"
+
+definition rectangle_64_80_key_size :: nat where 
+  "rectangle_64_80_key_size = 80"
+
+definition rectangle_64_80_sbox_table :: "nat list" where
+  "rectangle_64_80_sbox_table =
+   [0x6, 0x5, 0xC, 0xA, 0x1, 0xE, 0x7, 0x9,
+    0xB, 0x0, 0x3, 0xD, 0x8, 0xF, 0x4, 0x2]"
+
+definition rectangle_64_80_sbox_inv_table :: "nat list" where
+  "rectangle_64_80_sbox_inv_table =
+   [0x9, 0x4, 0xF, 0xA, 0xE, 0x1, 0x0, 0x6,
+    0xC, 0x7, 0x3, 0x8, 0x2, 0xB, 0x5, 0xD]"
+
+definition rectangle_64_80_rc :: "nat list" where
+  "rectangle_64_80_rc =
+   [0x01, 0x02, 0x04, 0x09, 0x12, 0x05, 0x0B, 0x16, 0x0C, 0x19,
+    0x13, 0x07, 0x0F, 0x1F, 0x1E, 0x1C, 0x18, 0x11, 0x03, 0x06,
+    0x0D, 0x1B, 0x17, 0x0E, 0x1D]"
+
+
+definition get_key_word :: "80 word \<Rightarrow> nat \<Rightarrow> 16 word" where
+  "get_key_word k i = ucast (drop_bit (16 * i) (take_bit (16 * (i+1)) k))"
+
+definition get_state_word :: "64 word \<Rightarrow> nat \<Rightarrow> 16 word" where
+  "get_state_word s i = ucast (drop_bit (16 * i) (take_bit (16 * (i+1)) s))"
+
+definition combine_state :: "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 64 word" where
+  "combine_state r0 r1 r2 r3 = 
+    or (or (or (ucast r0) (push_bit 16 (ucast r1))) 
+           (push_bit 32 (ucast r2))) 
+       (push_bit 48 (ucast r3))"
+
+
+definition rectangle_64_80_sub_column_table ::
+  "nat list \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_sub_column_table table r0 r1 r2 r3 = (
+    let 
+      build_word = (\<lambda>b. word_of_int (
+        \<Sum>i<16. 
+          if bit (word_of_int (int (table ! 
+            (((if bit r0 i then 1 else 0) +
+              (if bit r1 i then 2 else 0) +
+              (if bit r2 i then 4 else 0) +
+              (if bit r3 i then 8 else 0)) mod 16))) :: 4 word) b
+          then 2^i else 0
+      ))
+    in
+      (build_word 0, build_word 1, build_word 2, build_word 3)
+  )"
+
+definition rectangle_64_80_sub_column ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_sub_column = rectangle_64_80_sub_column_table rectangle_64_80_sbox_table"
+
+definition rectangle_64_80_sub_column_inv ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_sub_column_inv = rectangle_64_80_sub_column_table rectangle_64_80_sbox_inv_table"
+
+
+definition rectangle_64_80_shift_rows ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_shift_rows r0 r1 r2 r3 = (r0, word_rotl 1 r1, word_rotl 12 r2, word_rotl 13 r3)"
+
+definition rectangle_64_80_shift_rows_inv ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_shift_rows_inv r0 r1 r2 r3 = (r0, word_rotr 1 r1, word_rotr 12 r2, word_rotr 13 r3)"
+
+definition rectangle_64_80_add_round_key ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow>
+   16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow>
+   (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_add_round_key r0 r1 r2 r3 k0 k1 k2 k3 = 
+    (xor r0 k0, xor r1 k1, xor r2 k2, xor r3 k3)"
+
+
+definition rectangle_64_80_key_update_80 ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> nat \<Rightarrow>
+   (16 word \<times> 16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_key_update_80 w0 w1 w2 w3 w4 r = (
+    let
+      s_in = unat (and w0 (word_of_int 0xF));
+      s_out = rectangle_64_80_sbox_table ! s_in;
+      w0_cleared = and w0 (word_of_int 0xFFF0);
+      w0_sboxed = or w0_cleared (word_of_int (int s_out));
+      new_w0 = xor (word_rotl 8 w0_sboxed) (word_rotr 8 w1);
+      new_w1 = xor (word_rotl 8 w1) (word_rotr 8 w2);
+      new_w2 = xor (word_rotl 8 w2) (word_rotr 8 w3);
+      new_w3 = xor (word_rotl 8 w3) (word_rotr 8 w4);
+      new_w4 = xor (word_rotl 8 w4) (word_rotr 8 w0_sboxed);
+      rc_val = and (word_of_int (int (rectangle_64_80_rc ! r))) (word_of_int 0x1F)
+    in
+      (xor new_w0 rc_val, new_w1, new_w2, new_w3, new_w4)
+  )"
+
+definition rectangle_64_80_key_to_state :: "80 word \<Rightarrow> (16 word \<times> 16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_key_to_state k = (
+    get_key_word k 0,
+    get_key_word k 1,
+    get_key_word k 2,
+    get_key_word k 3,
+    get_key_word k 4
+  )"
+
+definition rectangle_64_80_generate_all_round_keys :: "80 word \<Rightarrow> ((16 word \<times> 16 word \<times> 16 word \<times> 16 word) list)" where
+  "rectangle_64_80_generate_all_round_keys key = (
+    let
+      init_state = rectangle_64_80_key_to_state key;
+      rounds_list = [0..<Suc rectangle_64_80_rounds] 
+    in
+      snd (foldl
+        (\<lambda>(state, keys) r. 
+          let
+            (w0, w1, w2, w3, w4) = state;
+            round_key = (w0, w1, w2, w3);
+            new_state = rectangle_64_80_key_update_80 w0 w1 w2 w3 w4 r
+          in
+            (new_state, round_key # keys))
+        (init_state, [])
+        rounds_list)
+  )"
+
+
+definition rectangle_64_80_encrypt_round ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow>
+   16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow>
+   (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_encrypt_round r0 r1 r2 r3 k0 k1 k2 k3 = (
+    let
+      (s0, s1, s2, s3) = rectangle_64_80_add_round_key r0 r1 r2 r3 k0 k1 k2 k3;
+      (t0, t1, t2, t3) = rectangle_64_80_sub_column s0 s1 s2 s3;
+      (u0, u1, u2, u3) = rectangle_64_80_shift_rows t0 t1 t2 t3
+    in (u0, u1, u2, u3))"
+
+
+definition rectangle_64_80_decrypt_round ::
+  "16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow>
+   16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow> 16 word \<Rightarrow>
+   (16 word \<times> 16 word \<times> 16 word \<times> 16 word)" where
+  "rectangle_64_80_decrypt_round r0 r1 r2 r3 k0 k1 k2 k3 =(
+    let
+      (s0, s1, s2, s3) = rectangle_64_80_shift_rows_inv r0 r1 r2 r3;
+      (t0, t1, t2, t3) = rectangle_64_80_sub_column_inv s0 s1 s2 s3;
+      (u0, u1, u2, u3) = rectangle_64_80_add_round_key t0 t1 t2 t3 k0 k1 k2 k3
+    in (u0, u1, u2, u3))"
+
+
+definition rectangle_64_80_encrypt_block :: "64 word \<Rightarrow> ((16 word \<times> 16 word \<times> 16 word \<times> 16 word) list) \<Rightarrow> 64 word" where
+  "rectangle_64_80_encrypt_block plaintext round_keys =(
+    let
+      r0 = get_state_word plaintext 0;
+      r1 = get_state_word plaintext 1;
+      r2 = get_state_word plaintext 2;
+      r3 = get_state_word plaintext 3;
+      rounds_to_apply = take rectangle_64_80_rounds round_keys;
+      (final_r0, final_r1, final_r2, final_r3) =
+        foldl (\<lambda>(s0,s1,s2,s3) (k0,k1,k2,k3). rectangle_64_80_encrypt_round s0 s1 s2 s3 k0 k1 k2 k3)
+              (r0,r1,r2,r3)
+              rounds_to_apply;
+      whitening_key = hd (drop rectangle_64_80_rounds round_keys);
+      (wk0,wk1,wk2,wk3) = whitening_key
+    in
+      combine_state (xor final_r0 wk0) (xor final_r1 wk1) (xor final_r2 wk2) (xor final_r3 wk3))"
+
+definition rectangle_64_80_decrypt_block :: "64 word \<Rightarrow> ((16 word \<times> 16 word \<times> 16 word \<times> 16 word) list) \<Rightarrow> 64 word" where
+  "rectangle_64_80_decrypt_block ciphertext round_keys = (
+    let
+      r0 = get_state_word ciphertext 0;
+      r1 = get_state_word ciphertext 1;
+      r2 = get_state_word ciphertext 2;
+      r3 = get_state_word ciphertext 3;
+      whitening_key = hd (drop rectangle_64_80_rounds round_keys);
+      (wk0,wk1,wk2,wk3) = whitening_key;
+      s0 = xor r0 wk0;
+      s1 = xor r1 wk1;
+      s2 = xor r2 wk2;
+      s3 = xor r3 wk3;
+      rounds_to_apply = rev (take rectangle_64_80_rounds round_keys);
+      (final_r0, final_r1, final_r2, final_r3) =
+        foldl (\<lambda>(s0,s1,s2,s3) (k0,k1,k2,k3). rectangle_64_80_decrypt_round s0 s1 s2 s3 k0 k1 k2 k3)
+              (s0,s1,s2,s3)
+              rounds_to_apply
+    in
+      combine_state final_r0 final_r1 final_r2 final_r3)"
+
+
+definition rectangle_64_80_encrypt :: "64 word \<Rightarrow> 80 word \<Rightarrow> 64 word" where
+  "rectangle_64_80_encrypt plaintext key = (
+    let round_keys = rectangle_64_80_generate_all_round_keys key
+    in rectangle_64_80_encrypt_block plaintext round_keys)"
+
+definition rectangle_64_80_decrypt :: "64 word \<Rightarrow> 80 word \<Rightarrow> 64 word" where
+  "rectangle_64_80_decrypt ciphertext key = (
+    let round_keys = rectangle_64_80_generate_all_round_keys key
+    in rectangle_64_80_decrypt_block ciphertext round_keys)"
+
+definition test_key :: "80 word" where
+  "test_key = 0xFFEEDDCCBBAA99887766"
+
+definition test_plaintext :: "64 word" where
+  "test_plaintext = 0x0123456789ABCDEF"
+
+
+end

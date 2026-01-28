@@ -1,0 +1,95 @@
+theory Speck_32_64
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+section ‹Speck 32/64: Core Definitions›
+
+text ‹Configuration for 32/64: word_size = 16, alpha = 7, beta = 2, rounds = 22›
+section ‹Speck 32/64: Core Definitions›
+
+definition speck_32_64_alpha :: nat where "speck_32_64_alpha = 7"
+
+
+definition speck_32_64_beta :: nat where "speck_32_64_beta = 2"
+
+
+definition speck_32_64_encrypt_round :: "16 word ⇒ 16 word × 16 word ⇒ 16 word × 16 word" where
+  "speck_32_64_encrypt_round k xy = (
+    let (x, y) = xy;
+        rs_x = word_rotr speck_32_64_alpha x;
+        add_xy = rs_x + y;
+        new_x = xor add_xy k;
+        ls_y = word_rotl speck_32_64_beta y;
+        new_y = xor new_x ls_y
+    in (new_x, new_y))"
+
+
+definition speck_32_64_decrypt_round_inverse :: "16 word ⇒ 16 word × 16 word ⇒ 16 word × 16 word" where
+  "speck_32_64_decrypt_round_inverse k xy_new = (
+    let (x, y) = xy_new;
+        xor_xy = xor x y;
+        new_y = word_rotr speck_32_64_beta xor_xy;
+        xor_xk = xor x k;
+        msub = xor_xk - new_y;
+        new_x = word_rotl speck_32_64_alpha msub
+    in (new_x, new_y))"
+
+
+function speck_32_64_gen_key_schedule_rec :: "16 word list ⇒ 16 word list ⇒ nat ⇒ 16 word list" where
+  "speck_32_64_gen_key_schedule_rec l_keys k_keys i = (
+     if i ≥ (22 - 1) then k_keys
+     else
+       let (new_l, new_k) = speck_32_64_encrypt_round (word_of_nat i) (l_keys ! i, k_keys ! i)
+       in speck_32_64_gen_key_schedule_rec (l_keys @ [new_l]) (k_keys @ [new_k]) (i + 1))"
+  by pat_completeness auto
+termination by (relation "measure (λ(l, k, i). 21 - i)") auto
+
+
+definition speck_32_64_generate_key_schedule :: "16 word list ⇒ 16 word list" where
+  "speck_32_64_generate_key_schedule initial_key_words = (
+     let k0 = [initial_key_words ! 0];
+         l0 = [initial_key_words ! 1, initial_key_words ! 2, initial_key_words ! 3]
+     in speck_32_64_gen_key_schedule_rec l0 k0 0)"
+
+
+subsection ‹Iteration, Block, and Top-Level Wrappers›
+
+(* Level 1: Raw Iteration (The Loop) *)
+fun speck_32_64_encrypt_iterate :: "16 word × 16 word ⇒ 16 word list ⇒ 16 word × 16 word" where
+  "speck_32_64_encrypt_iterate state [] = state"
+| "speck_32_64_encrypt_iterate state (k#ks) = speck_32_64_encrypt_iterate (speck_32_64_encrypt_round k state) ks"
+
+
+fun speck_32_64_decrypt_iterate :: "16 word × 16 word ⇒ 16 word list ⇒ 16 word × 16 word" where
+  "speck_32_64_decrypt_iterate state ks = foldl (λst_new k. speck_32_64_decrypt_round_inverse k st_new) state (rev ks)"
+
+
+(* Level 2: Block Logic (The Bridge) *)
+definition speck_32_64_encrypt_block :: "16 word × 16 word ⇒ 16 word list ⇒ 16 word × 16 word" where
+  "speck_32_64_encrypt_block state keys = speck_32_64_encrypt_iterate state keys"
+
+
+definition speck_32_64_decrypt_block :: "16 word × 16 word ⇒ 16 word list ⇒ 16 word × 16 word" where
+  "speck_32_64_decrypt_block state keys = speck_32_64_decrypt_iterate state keys"
+
+
+(* Level 3: Top-Level Wrapper (Word Slicing) *)
+definition speck_32_64_encrypt :: "32 word ⇒ 16 word list ⇒ 32 word" where
+  "speck_32_64_encrypt plaintext keys = (
+    let left = ucast (drop_bit 16 plaintext);
+        right = ucast plaintext;
+        (c_l, c_r) = speck_32_64_encrypt_block (left, right) keys
+    in or (push_bit 16 (ucast c_l)) (ucast c_r))"
+
+
+definition speck_32_64_decrypt :: "32 word ⇒ 16 word list ⇒ 32 word" where
+  "speck_32_64_decrypt ciphertext keys = (
+    let left = ucast (drop_bit 16 ciphertext);
+        right = ucast ciphertext;
+        (p_l, p_r) = speck_32_64_decrypt_block (left, right) keys
+    in or (push_bit 16 (ucast p_l)) (ucast p_r))"
+
+
+end

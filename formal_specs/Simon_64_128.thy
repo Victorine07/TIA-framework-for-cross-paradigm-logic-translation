@@ -1,0 +1,88 @@
+theory Simon_64_128
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+
+definition simon_64_128_z3 :: int where
+  "simon_64_128_z3 = 0b11110000101100111001010001001000000111101001100011010111011011"
+
+
+definition simon_64_128_F_function :: "32 word ⇒ 32 word" where
+  "simon_64_128_F_function x = xor (and (word_rotl 1 x) (word_rotl 8 x)) (word_rotl 2 x)"
+
+
+definition simon_64_128_encrypt_round :: "32 word ⇒ 32 word × 32 word ⇒ 32 word × 32 word" where
+  "simon_64_128_encrypt_round k xy = (let (x, y) = xy in (xor (xor k (simon_64_128_F_function x)) y, x))"
+
+
+definition simon_64_128_decrypt_round_inverse :: "32 word ⇒ 32 word × 32 word ⇒ 32 word × 32 word" where
+  "simon_64_128_decrypt_round_inverse k xy_new = (let (x_new, y_new) = xy_new in (y_new, xor (xor x_new k) (simon_64_128_F_function y_new)))"
+
+
+definition simon_64_128_rho_const :: "32 word" where
+  "simon_64_128_rho_const = 0xFFFFFFFC"
+
+
+function simon_64_128_gen_key_schedule_rec :: "32 word list ⇒ nat ⇒ 32 word list" where
+  "simon_64_128_gen_key_schedule_rec current_keys i = (
+     if i ≥ 44 then current_keys
+     else
+       let z_bit = bit simon_64_128_z3 (i - 4);
+           rs_3 = word_rotr 3 (current_keys ! (i - 1));
+           rs_1 = word_rotr 1 (rs_3);
+           new_k = xor (xor (xor (current_keys ! (i - 4)) rs_3) rs_1) 
+                       (xor (if z_bit then 1 else 0) simon_64_128_rho_const)
+       in simon_64_128_gen_key_schedule_rec (current_keys @ [new_k]) (i + 1))"
+  by pat_completeness auto
+termination
+  apply (relation "measure (λ(keys, i). 44 - i)")
+  apply auto
+  done
+
+
+definition simon_64_128_generate_key_schedule :: "32 word list ⇒ 32 word list" where
+  "simon_64_128_generate_key_schedule initial_keys = simon_64_128_gen_key_schedule_rec initial_keys (length initial_keys)"
+
+
+fun simon_64_128_encrypt_iterate :: "32 word × 32 word ⇒ 32 word list ⇒ 32 word × 32 word" where
+  "simon_64_128_encrypt_iterate st [] = st"
+| "simon_64_128_encrypt_iterate st (k#ks) = simon_64_128_encrypt_iterate (simon_64_128_encrypt_round k st) ks"
+
+
+fun simon_64_128_decrypt_iterate :: "32 word × 32 word ⇒ 32 word list ⇒ 32 word × 32 word" where
+  "simon_64_128_decrypt_iterate st ks = foldl (λst_new k. simon_64_128_decrypt_round_inverse k st_new) st (rev ks)"
+
+
+definition simon_64_128_encrypt_block ::
+  "32 word × 32 word ⇒ 32 word list ⇒ 32 word × 32 word" where
+"simon_64_128_encrypt_block state keys =
+   simon_64_128_encrypt_iterate state keys"
+
+
+definition simon_64_128_decrypt_block ::
+  "32 word × 32 word ⇒ 32 word list ⇒ 32 word × 32 word" where
+"simon_64_128_decrypt_block state keys =
+   simon_64_128_decrypt_iterate state keys"
+
+
+definition simon_64_128_encrypt ::
+  "64 word ⇒ 32 word list ⇒ 64 word" where
+"simon_64_128_encrypt plaintext keys =
+  (let left  = ucast (drop_bit 32 plaintext);
+       right = ucast plaintext;
+       (c_l, c_r) = simon_64_128_encrypt_block (left, right) keys
+   in or (push_bit 32 (ucast c_l)) (ucast c_r))"
+
+
+definition simon_64_128_decrypt ::
+  "64 word ⇒ 32 word list ⇒ 64 word" where
+"simon_64_128_decrypt ciphertext keys =
+  (let left  = ucast (drop_bit 32 ciphertext);
+       right = ucast ciphertext;
+       (p_l, p_r) = simon_64_128_decrypt_block (left, right) keys
+   in or (push_bit 32 (ucast p_l)) (ucast p_r))"
+
+
+end

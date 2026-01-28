@@ -1,0 +1,119 @@
+theory SKINNY_64_64
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+section ‹SKINNY 64-64: Core Definitions›
+
+subsection ‹Configuration Constants›
+
+definition skinny_64_64_rounds :: nat where "skinny_64_64_rounds = 32"
+
+subsection ‹Cell Access Helper Functions›
+
+definition skinny_64_64_get_cell :: "nat ⇒ 64 word ⇒ 4 word" where
+  "skinny_64_64_get_cell i s = ucast (drop_bit (4 * i) s)"
+
+definition skinny_64_64_set_cell :: "nat ⇒ 4 word ⇒ 64 word ⇒ 64 word" where
+  "skinny_64_64_set_cell i c s = (
+    let shift_val = 4 * i;
+        clear_mask = not (push_bit shift_val (0xF :: 64 word))
+    in or (and s clear_mask) (push_bit shift_val (ucast c :: 64 word)))"
+
+subsection ‹SubCells (SC) Layer›
+
+definition skinny_64_64_sbox_table :: "nat list" where 
+  "skinny_64_64_sbox_table = [0xC, 0x6, 0x9, 0x0, 0x1, 0xA, 0x2, 0xB, 0x3, 0x8, 0x5, 0xD, 0x4, 0xE, 0x7, 0xF]"
+
+definition skinny_64_64_sbox_inv_table :: "nat list" where 
+  "skinny_64_64_sbox_inv_table = [0x3, 0x4, 0x6, 0x8, 0xC, 0xA, 0x1, 0xE, 0x9, 0x2, 0x5, 0x7, 0x0, 0xB, 0xD, 0xF]"
+
+definition skinny_64_64_sub_cells :: "64 word ⇒ 64 word" where
+  "skinny_64_64_sub_cells s = foldr (λi acc. 
+    skinny_64_64_set_cell i (of_nat (skinny_64_64_sbox_table ! unat (skinny_64_64_get_cell i acc))) acc) [0..<16] s"
+
+definition skinny_64_64_sub_cells_inverse :: "64 word ⇒ 64 word" where
+  "skinny_64_64_sub_cells_inverse s = foldr (λi acc. 
+    skinny_64_64_set_cell i (of_nat (skinny_64_64_sbox_inv_table ! unat (skinny_64_64_get_cell i acc))) acc) [0..<16] s"
+
+subsection ‹Add Round Constant and Tweakey (ARC/ART)›
+
+definition skinny_64_64_rc_table :: "6 word list" where
+  "skinny_64_64_rc_table = map of_nat [0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3E, 0x3D, 0x3B, 0x37, 0x2F, 0x1E, 0x3C, 0x39, 0x33, 0x27, 0x0E, 0x1D, 0x3A, 0x35, 0x2B, 0x16, 0x2C, 0x18, 0x30, 0x21, 0x02, 0x05, 0x0B, 0x17, 0x2E, 0x1C, 0x38]"
+
+definition skinny_64_64_add_round_constant :: "nat ⇒ 64 word ⇒ 64 word" where
+"skinny_64_64_add_round_constant r s = (
+    let rc = skinny_64_64_rc_table ! r;
+        c0 = and rc 0xF;
+        c1 = ucast (drop_bit 4 rc) :: 4 word;
+        c2 = 0x2 :: 4 word
+    in skinny_64_64_set_cell 0 (xor (skinny_64_64_get_cell 0 s) (ucast c0))
+       (skinny_64_64_set_cell 4 (xor (skinny_64_64_get_cell 4 s) c1)
+       (skinny_64_64_set_cell 8 (xor (skinny_64_64_get_cell 8 s) c2) s)))"
+
+subsection ‹ShiftRows (SR) Layer›
+
+definition skinny_64_64_sr_map :: "nat list" where "skinny_64_64_sr_map = [0, 1, 2, 3, 5, 6, 7, 4, 10, 11, 8, 9, 15, 12, 13, 14]"
+definition skinny_64_64_sr_inv_map :: "nat list" where "skinny_64_64_sr_inv_map = [0, 1, 2, 3, 7, 4, 5, 6, 10, 11, 8, 9, 13, 14, 15, 12]"
+
+definition skinny_64_64_shift_rows :: "64 word ⇒ 64 word" where
+  "skinny_64_64_shift_rows s = foldr (λi acc. skinny_64_64_set_cell i (skinny_64_64_get_cell (skinny_64_64_sr_map ! i) s) acc) [0..<16] 0"
+
+definition skinny_64_64_shift_rows_inverse :: "64 word ⇒ 64 word" where
+  "skinny_64_64_shift_rows_inverse s = foldr (λi acc. skinny_64_64_set_cell i (skinny_64_64_get_cell (skinny_64_64_sr_inv_map ! i) s) acc) [0..<16] 0"
+
+subsection ‹MixColumns (MC) Layer›
+
+definition skinny_64_64_mc_transform :: "4 word list ⇒ 4 word list" where
+"skinny_64_64_mc_transform cs = [xor (xor (cs!0) (cs!2)) (cs!3), cs!0, xor (cs!1) (cs!2), xor (cs!0) (cs!2)]"
+
+definition skinny_64_64_mc_inv_transform :: "4 word list ⇒ 4 word list" where
+"skinny_64_64_mc_inv_transform cs = [cs!1, xor (xor (xor (cs!0) (cs!1)) (cs!2)) (cs!3), xor (xor (cs!0) (cs!2)) (cs!3), xor (cs!0) (cs!1)]"
+
+definition skinny_64_64_mix_columns :: "64 word ⇒ 64 word" where
+"skinny_64_64_mix_columns s = (
+  let col = λj. [skinny_64_64_get_cell j s, skinny_64_64_get_cell (j+4) s, skinny_64_64_get_cell (j+8) s, skinny_64_64_get_cell (j+12) s];
+      c0 = skinny_64_64_mc_transform (col 0); c1 = skinny_64_64_mc_transform (col 1);
+      c2 = skinny_64_64_mc_transform (col 2); c3 = skinny_64_64_mc_transform (col 3);
+      res = [c0!0, c1!0, c2!0, c3!0, c0!1, c1!1, c2!1, c3!1, c0!2, c1!2, c2!2, c3!2, c0!3, c1!3, c2!3, c3!3]
+  in foldr (λ(i,c) acc. skinny_64_64_set_cell i c acc) (zip [0..<16] res) 0)"
+
+definition skinny_64_64_mix_columns_inverse :: "64 word ⇒ 64 word" where
+"skinny_64_64_mix_columns_inverse s = (
+  let col = λj. [skinny_64_64_get_cell j s, skinny_64_64_get_cell (j+4) s, skinny_64_64_get_cell (j+8) s, skinny_64_64_get_cell (j+12) s];
+      c0 = skinny_64_64_mc_inv_transform (col 0); c1 = skinny_64_64_mc_inv_transform (col 1);
+      c2 = skinny_64_64_mc_inv_transform (col 2); c3 = skinny_64_64_mc_inv_transform (col 3);
+      res = [c0!0, c1!0, c2!0, c3!0, c0!1, c1!1, c2!1, c3!1, c0!2, c1!2, c2!2, c3!2, c0!3, c1!3, c2!3, c3!3]
+  in foldr (λ(i,c) acc. skinny_64_64_set_cell i c acc) (zip [0..<16] res) 0)"
+
+subsection ‹Key Schedule Update›
+
+definition skinny_64_64_tk_permute :: "64 word ⇒ 64 word" where
+"skinny_64_64_tk_permute tk = (
+  let c = λj. skinny_64_64_get_cell j tk;
+      p = [c 9, c 15, c 8, c 13, c 10, c 14, c 12, c 11, c 0, c 1, c 2, c 3, c 4, c 5, c 6, c 7]
+  in foldr (λ(j,v) acc. skinny_64_64_set_cell j v acc) (zip [0..<16] p) 0)"
+
+fun skinny_64_64_gen_key_schedule :: "64 word ⇒ nat ⇒ 64 word list" where
+  "skinny_64_64_gen_key_schedule tk 0 = []"
+| "skinny_64_64_gen_key_schedule tk (Suc n) = tk # skinny_64_64_gen_key_schedule (skinny_64_64_tk_permute tk) n"
+
+subsection ‹Round and Iteration Logic›
+
+definition skinny_64_64_encrypt_round :: "64 word ⇒ nat ⇒ 64 word ⇒ 64 word" where
+"skinny_64_64_encrypt_round k r s = 
+  skinny_64_64_mix_columns (skinny_64_64_shift_rows (xor (skinny_64_64_add_round_constant r (skinny_64_64_sub_cells s)) k))"
+
+definition skinny_64_64_decrypt_round_inverse :: "64 word ⇒ nat ⇒ 64 word ⇒ 64 word" where
+"skinny_64_64_decrypt_round_inverse k r s = 
+  skinny_64_64_sub_cells_inverse (skinny_64_64_add_round_constant r (xor (skinny_64_64_shift_rows_inverse (skinny_64_64_mix_columns_inverse s)) k))"
+
+fun skinny_64_64_encrypt_iterate :: "64 word ⇒ 64 word list ⇒ nat ⇒ 64 word" where
+  "skinny_64_64_encrypt_iterate s [] _ = s"
+| "skinny_64_64_encrypt_iterate s (k#ks) r = skinny_64_64_encrypt_iterate (skinny_64_64_encrypt_round k r s) ks (r + 1)"
+
+fun skinny_64_64_decrypt_iterate :: "64 word ⇒ 64 word list ⇒ nat ⇒ 64 word" where
+  "skinny_64_64_decrypt_iterate s ks r = foldl (λacc (k, round). skinny_64_64_decrypt_round_inverse k round acc) s (rev (zip ks [0..<skinny_64_64_rounds]))"
+
+end

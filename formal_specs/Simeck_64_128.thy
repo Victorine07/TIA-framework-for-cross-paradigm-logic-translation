@@ -1,0 +1,89 @@
+theory Simeck_64_128
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+
+fun simeck_64_128_get_sequence_rec :: "nat \<Rightarrow> nat \<Rightarrow> bool list \<Rightarrow> bool list" where
+  "simeck_64_128_get_sequence_rec 0 idx states = states"
+| "simeck_64_128_get_sequence_rec (Suc n) idx states = (
+    let feedback = (states ! idx) \<noteq> (states ! (idx + 1))
+    in simeck_64_128_get_sequence_rec n (idx + 1) (states @ [feedback]))"
+
+
+definition simeck_64_128_round_constants_sequence :: "bool list" where
+  "simeck_64_128_round_constants_sequence = simeck_64_128_get_sequence_rec (44 - 6) 0 (replicate 6 True)"
+
+
+definition simeck_64_128_F_function :: "32 word \<Rightarrow> 32 word" where
+  "simeck_64_128_F_function x = xor (and x (word_rotl 5 x)) (word_rotl 1 x)"
+
+
+definition simeck_64_128_encrypt_round :: "32 word \<Rightarrow> 32 word \<times> 32 word \<Rightarrow> 32 word \<times> 32 word" where
+  "simeck_64_128_encrypt_round k xy = (
+    let (left, right) = xy in 
+    (xor (xor (simeck_64_128_F_function left) right) k, left))"
+
+
+definition simeck_64_128_decrypt_round_inverse :: "32 word \<Rightarrow> 32 word \<times> 32 word \<Rightarrow> 32 word \<times> 32 word" where
+  "simeck_64_128_decrypt_round_inverse k xy_new = (
+    let (left_new, right_new) = xy_new in 
+    (right_new, xor (xor left_new k) (simeck_64_128_F_function right_new)))"
+
+
+definition simeck_64_128_key_schedule_constant :: "32 word" where
+  "simeck_64_128_key_schedule_constant = 0xFFFFFFFC"
+
+
+fun simeck_64_128_gen_key_schedule_rec :: "32 word list \<Rightarrow> bool list \<Rightarrow> 32 word list" where
+  "simeck_64_128_gen_key_schedule_rec states [] = []"
+| "simeck_64_128_gen_key_schedule_rec states (c#cs) = (
+    let k_0 = states ! 0;
+        left = states ! 1;
+        right = states ! 0;
+        round_const = xor simeck_64_128_key_schedule_constant (if c then 1 else 0);
+        (new_left, new_right) = simeck_64_128_encrypt_round round_const (left, right);
+        new_states = (tl states) @ [new_left]
+    in k_0 # simeck_64_128_gen_key_schedule_rec (new_states[0 := new_right]) cs)"
+
+
+definition simeck_64_128_generate_key_schedule :: "32 word list \<Rightarrow> 32 word list" where
+  "simeck_64_128_generate_key_schedule initial_keys = 
+     simeck_64_128_gen_key_schedule_rec initial_keys simeck_64_128_round_constants_sequence"
+
+
+fun simeck_64_128_encrypt_iterate :: "32 word \<times> 32 word \<Rightarrow> 32 word list \<Rightarrow> 32 word \<times> 32 word" where
+  "simeck_64_128_encrypt_iterate state [] = state"
+| "simeck_64_128_encrypt_iterate state (k#ks) = simeck_64_128_encrypt_iterate (simeck_64_128_encrypt_round k state) ks"
+
+
+fun simeck_64_128_decrypt_iterate :: "32 word \<times> 32 word \<Rightarrow> 32 word list \<Rightarrow> 32 word \<times> 32 word" where
+  "simeck_64_128_decrypt_iterate state ks = foldl (\<lambda>st_new k. simeck_64_128_decrypt_round_inverse k st_new) state (rev ks)"
+
+
+definition simeck_64_128_encrypt_block :: "32 word \<times> 32 word \<Rightarrow> 32 word list \<Rightarrow> 32 word \<times> 32 word" where
+  "simeck_64_128_encrypt_block plaintext keys = simeck_64_128_encrypt_iterate plaintext keys"
+
+
+definition simeck_64_128_decrypt_block :: "32 word \<times> 32 word \<Rightarrow> 32 word list \<Rightarrow> 32 word \<times> 32 word" where
+  "simeck_64_128_decrypt_block ciphertext keys = simeck_64_128_decrypt_iterate ciphertext keys"
+
+
+definition simeck_64_128_encrypt :: "64 word \<Rightarrow> 32 word list \<Rightarrow> 64 word" where
+  "simeck_64_128_encrypt plaintext keys = (
+    let left = ucast (drop_bit 32 plaintext);
+        right = ucast plaintext;
+        (c_left, c_right) = simeck_64_128_encrypt_block (left, right) keys
+    in or (push_bit 32 (ucast c_left)) (ucast c_right))"
+
+
+definition simeck_64_128_decrypt :: "64 word \<Rightarrow> 32 word list \<Rightarrow> 64 word" where
+  "simeck_64_128_decrypt ciphertext keys = (
+    let left = ucast (drop_bit 32 ciphertext);
+        right = ucast ciphertext;
+        (p_left, p_right) = simeck_64_128_decrypt_block (left, right) keys
+    in or (push_bit 32 (ucast p_left)) (ucast p_right))"
+
+
+end

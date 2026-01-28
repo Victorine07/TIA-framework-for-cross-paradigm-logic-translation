@@ -1,0 +1,13 @@
+
+pip install --upgrade pip
+
+pip install numpy scipy pandas scikit-learn matplotlib
+
+pip install transformers accelerate datasets peft
+
+pip install sentencepiece protobuf einops tokenizers
+
+pip install tqdm pyarrow python-Levenshtein jsonlines
+
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+

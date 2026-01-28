@@ -1,0 +1,381 @@
+theory Sparx_128_256
+  imports
+    "HOL-Library.Word"
+    "HOL.Bit_Operations"
+begin
+
+
+definition sparx_128_256_block_size :: nat where "sparx_128_256_block_size = 128"
+
+
+definition sparx_128_256_key_size :: nat where "sparx_128_256_key_size = 256"
+
+
+definition sparx_128_256_n_steps :: nat where "sparx_128_256_n_steps = 10"
+
+
+definition sparx_128_256_rounds_per_step :: nat where "sparx_128_256_rounds_per_step = 4"
+
+
+definition sparx_128_256_word_size :: nat where "sparx_128_256_word_size = 16"
+
+
+definition sparx_128_256_n_branches :: nat where "sparx_128_256_n_branches = 4"
+
+
+definition sparx_128_256_n_words :: nat where "sparx_128_256_n_words = 8"
+
+
+definition sparx_128_256_total_rounds :: nat where 
+  "sparx_128_256_total_rounds = sparx_128_256_n_steps * sparx_128_256_rounds_per_step"
+
+
+definition sparx_128_256_round_key_words :: nat where
+  "sparx_128_256_round_key_words = 4"
+
+
+definition sparx_128_256_rol :: "'a::len word \<Rightarrow> nat \<Rightarrow> 'a word" where
+  "sparx_128_256_rol x r = word_rotl r x"
+
+
+definition sparx_128_256_ror :: "'a::len word \<Rightarrow> nat \<Rightarrow> 'a word" where
+  "sparx_128_256_ror x r = word_rotr r x"
+
+
+definition sparx_128_256_A_perm_16 :: "16 word \<Rightarrow> 16 word \<Rightarrow> (16 word \<times> 16 word)" where
+  "sparx_128_256_A_perm_16 x y = (
+    let x_rot = sparx_128_256_ror x 7;
+        x_new = x_rot + y;
+        y_rot = sparx_128_256_rol y 2;
+        y_new = xor y_rot x_new
+    in (x_new, y_new))"
+
+
+definition sparx_128_256_A_perm_16_inv :: "16 word \<Rightarrow> 16 word \<Rightarrow> (16 word \<times> 16 word)" where
+  "sparx_128_256_A_perm_16_inv x y = (
+    let y_temp = xor y x;
+        y_new = sparx_128_256_ror y_temp 2;
+        x_temp = x - y_new;
+        x_new = sparx_128_256_rol x_temp 7
+    in (x_new, y_new))"
+
+
+definition sparx_128_256_L_w :: "16 word \<Rightarrow> 16 word" where
+  "sparx_128_256_L_w x = xor (push_bit 8 x) (drop_bit 8 x)"
+
+
+definition sparx_128_256_linear_layer :: "16 word list \<Rightarrow> 16 word list" where
+"sparx_128_256_linear_layer s = (
+  if length s = 8 then
+    let
+      t0 = sparx_128_256_L_w (xor (s ! 0) (s ! 1));
+      t1 = sparx_128_256_L_w (xor (s ! 2) (s ! 3));
+      t2 = sparx_128_256_L_w (xor (s ! 4) (s ! 5));
+      t3 = sparx_128_256_L_w (xor (s ! 6) (s ! 7))
+    in
+      [ xor (s ! 2) t0, xor (s ! 3) t0,
+        xor (s ! 4) t1, xor (s ! 5) t1,
+        xor (s ! 6) t2, xor (s ! 7) t2,
+        xor (s ! 0) t3, xor (s ! 1) t3 ]
+  else s)"
+
+
+definition sparx_128_256_linear_layer_inv ::
+  "16 word list \<Rightarrow> 16 word list" where
+"sparx_128_256_linear_layer_inv = sparx_128_256_linear_layer"
+
+
+definition sparx_128_256_extract_key_words :: "256 word \<Rightarrow> 16 word list" where
+  "sparx_128_256_extract_key_words master_key = 
+    [ucast master_key,
+     ucast (drop_bit 16 master_key),
+     ucast (drop_bit 32 master_key),
+     ucast (drop_bit 48 master_key),
+     ucast (drop_bit 64 master_key),
+     ucast (drop_bit 80 master_key),
+     ucast (drop_bit 96 master_key),
+     ucast (drop_bit 112 master_key)]"
+
+
+
+function sparx_128_256_gen_key_schedule_iterate ::
+  "16 word list \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> 16 word list \<Rightarrow> 16 word list" where
+"sparx_128_256_gen_key_schedule_iterate k c idx rk = (
+  if idx \<ge> sparx_128_256_total_rounds then rk
+  else
+    let
+      rk_new = rk @ [k!0, k!1, k!2, k!3];
+      (k0', k1') = sparx_128_256_A_perm_16 (k!0) (k!1);
+      k2' = k!2 + k0';
+      k3' = k!3 + k1' + word_of_nat c;
+      k_next =
+        [k0', k1', k2', k3',
+         k!4, k!5, k!6, k!7]
+    in
+      sparx_128_256_gen_key_schedule_iterate
+        k_next (c + 1) (idx + 1) rk_new
+)"
+by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(k,c,idx,rk). sparx_128_256_total_rounds - idx)")
+  apply auto
+  done
+
+
+
+
+definition sparx_128_256_generate_key_schedule :: "256 word \<Rightarrow> 16 word list" where
+  "sparx_128_256_generate_key_schedule master_key = (
+    let key_words = sparx_128_256_key_size div 16;
+        total_needed = (sparx_128_256_total_rounds + 1) * sparx_128_256_n_branches;
+        initial_k = sparx_128_256_extract_key_words master_key
+    in sparx_128_256_gen_key_schedule_iterate initial_k 1 0 [])"
+
+
+function sparx_128_256_get_round_key_iterate ::
+  "16 word list \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> 16 word list \<Rightarrow> 16 word list" where
+  "sparx_128_256_get_round_key_iterate rk_words idx max_idx keys = (
+    if idx \<ge> max_idx then keys
+    else
+      let base = idx * sparx_128_256_round_key_words;
+          k1 = if base < length rk_words then rk_words ! base     else 0;
+          k2 = if base + 1 < length rk_words then rk_words ! (base + 1) else 0;
+          k3 = if base + 2 < length rk_words then rk_words ! (base + 2) else 0;
+          k4 = if base + 3 < length rk_words then rk_words ! (base + 3) else 0;
+          keys_new = keys @ [k1,k2,k3,k4]
+      in sparx_128_256_get_round_key_iterate rk_words (idx + 1) max_idx keys_new)"
+   by pat_completeness auto
+termination
+  apply (relation "measure(\<lambda>(rk_words, idx, max_idx, keys). max_idx - idx)")
+  apply auto
+  done
+
+
+definition sparx_128_256_get_all_round_keys :: "16 word list \<Rightarrow> 16 word list" where
+"sparx_128_256_get_all_round_keys rk_words =
+  sparx_128_256_get_round_key_iterate
+    rk_words
+    0
+    sparx_128_256_total_rounds
+    []"
+
+
+definition sparx_128_256_whitening_index :: nat where
+  "sparx_128_256_whitening_index =
+     (sparx_128_256_total_rounds - 1) * sparx_128_256_round_key_words"
+
+
+definition sparx_128_256_apply_encrypt_round ::
+  "16 word list \<Rightarrow> 16 word list \<Rightarrow> 16 word list" where
+"sparx_128_256_apply_encrypt_round state round_keys = (
+  if length state = sparx_128_256_n_words \<and> length round_keys = 4 then
+    let
+      (a0,a1) = sparx_128_256_A_perm_16 (xor (state!0) (round_keys!0))(state!1);
+      (a2,a3) = sparx_128_256_A_perm_16 (xor (state!2) (round_keys!1))(state!3);
+      (a4,a5) = sparx_128_256_A_perm_16 (xor (state!4) (round_keys!2))(state!5);
+      (a6,a7) = sparx_128_256_A_perm_16  (xor (state!6) (round_keys!3))(state!7)
+    in
+      [a0,a1,a2,a3,a4,a5,a6,a7]
+  else state
+)"
+
+
+
+definition sparx_128_256_apply_decrypt_round ::
+  "16 word list \<Rightarrow> 16 word list \<Rightarrow> 16 word list" where
+"sparx_128_256_apply_decrypt_round state round_keys = (
+  if length state = sparx_128_256_n_words \<and> length round_keys = 4 then
+    let
+      (s0', s1') = sparx_128_256_A_perm_16_inv (state ! 0) (state ! 1);
+      s0 = xor s0' (round_keys ! 0);
+      (s2', s3') = sparx_128_256_A_perm_16_inv (state ! 2) (state ! 3);
+      s2 = xor s2' (round_keys ! 1);
+      (s4', s5') = sparx_128_256_A_perm_16_inv (state ! 4) (state ! 5);
+      s4 = xor s4' (round_keys ! 2);
+      (s6', s7') = sparx_128_256_A_perm_16_inv (state ! 6) (state ! 7);
+      s6 = xor s6' (round_keys ! 3)
+    in
+      [ s0, s1',
+        s2, s3',
+        s4, s5',
+        s6, s7' ]
+  else state)"
+
+
+function sparx_128_256_encrypt_step_iterate :: 
+  "16 word list \<Rightarrow> 16 word list \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> 16 word list" where
+"sparx_128_256_encrypt_step_iterate state all_keys round step = (
+  if round \<ge> sparx_128_256_rounds_per_step then state
+  else
+    let
+      idx = step * sparx_128_256_rounds_per_step + round;
+      k0 = if idx * 4 < length all_keys then all_keys ! (idx * 4) else 0;
+      k1 = if idx * 4 + 1 < length all_keys then all_keys ! (idx * 4 + 1) else 0;
+      k2 = if idx * 4 + 2 < length all_keys then all_keys ! (idx * 4 + 2) else 0;
+      k3 = if idx * 4 + 3 < length all_keys then all_keys ! (idx * 4 + 3) else 0;
+      round_keys = [k0, k1, k2, k3];
+      new_state = sparx_128_256_apply_encrypt_round state round_keys
+    in
+      sparx_128_256_encrypt_step_iterate new_state all_keys (round + 1) step
+)"
+by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(state, all_keys, round, step). sparx_128_256_rounds_per_step - round)")
+  apply auto
+  done
+
+
+function sparx_128_256_decrypt_step_iterate :: 
+  "16 word list \<Rightarrow> 16 word list \<Rightarrow> nat \<Rightarrow> nat \<Rightarrow> 16 word list" where
+"sparx_128_256_decrypt_step_iterate state all_keys round step = (
+  if round \<ge> sparx_128_256_rounds_per_step then state
+  else
+    let
+      idx = step * sparx_128_256_rounds_per_step + (sparx_128_256_rounds_per_step - round - 1);
+      k0 = if idx * 4 < length all_keys then all_keys ! (idx * 4) else 0;
+      k1 = if idx * 4 + 1 < length all_keys then all_keys ! (idx * 4 + 1) else 0;
+      k2 = if idx * 4 + 2 < length all_keys then all_keys ! (idx * 4 + 2) else 0;
+      k3 = if idx * 4 + 3 < length all_keys then all_keys ! (idx * 4 + 3) else 0;
+      round_keys = [k0, k1, k2, k3];
+      new_state = sparx_128_256_apply_decrypt_round state round_keys
+    in
+      sparx_128_256_decrypt_step_iterate new_state all_keys (round + 1) step
+)"
+by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(state, all_keys, round, step). sparx_128_256_rounds_per_step - round)")
+  apply auto
+  done
+
+
+definition sparx_128_256_block_to_words :: "128 word \<Rightarrow> 16 word list" where
+"sparx_128_256_block_to_words block =
+  [ ucast block,
+    ucast (drop_bit 16 block),
+    ucast (drop_bit 32 block),
+    ucast (drop_bit 48 block),
+    ucast (drop_bit 64 block),
+    ucast (drop_bit 80 block),
+    ucast (drop_bit 96 block),
+    ucast (drop_bit 112 block) ]"
+
+
+definition sparx_128_256_words_to_block :: "16 word list \<Rightarrow> 128 word" where
+  "sparx_128_256_words_to_block words = (
+    if length words = sparx_128_256_n_words then
+      foldl (\<lambda>acc i. 
+        let idx = sparx_128_256_n_words - i - 1;
+            shift = 16 * idx;
+            word_val = if idx < length words then ucast (words ! idx) else 0
+        in or (push_bit shift word_val) acc) 0 [0..<sparx_128_256_n_words]
+    else 0)"
+
+
+function sparx_128_256_decrypt_steps_iterate ::
+  "16 word list \<Rightarrow> 16 word list \<Rightarrow> nat \<Rightarrow> 16 word list" where
+"sparx_128_256_decrypt_steps_iterate state all_keys step = (
+  if step \<ge> sparx_128_256_n_steps then state
+  else
+    let rev_step = sparx_128_256_n_steps - step - 1;
+        state_after_rounds =
+          sparx_128_256_decrypt_step_iterate
+            state
+            all_keys
+            0
+            rev_step;
+        state_after_linear =
+          if rev_step > 0 then
+            sparx_128_256_linear_layer_inv state_after_rounds
+          else state_after_rounds
+    in sparx_128_256_decrypt_steps_iterate
+         state_after_linear
+         all_keys
+         (step + 1))"
+by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(s, k, i). sparx_128_256_n_steps - i)")
+  apply auto
+  done
+
+
+function sparx_128_256_encrypt_steps_iterate :: 
+  "16 word list \<Rightarrow> 16 word list \<Rightarrow> nat \<Rightarrow> 16 word list" where
+  "sparx_128_256_encrypt_steps_iterate state all_keys step = (
+    if step \<ge> sparx_128_256_n_steps then state
+    else
+      let state_after_rounds = sparx_128_256_encrypt_step_iterate state all_keys 0 step;
+          state_after_linear = 
+            if step < sparx_128_256_n_steps - 1 then
+              sparx_128_256_linear_layer state_after_rounds
+            else state_after_rounds
+      in sparx_128_256_encrypt_steps_iterate state_after_linear all_keys (step + 1))"
+  by pat_completeness auto
+termination
+  apply (relation "measure (\<lambda>(state, all_keys, step). sparx_128_256_n_steps - step)")
+  apply auto
+  done
+
+
+definition sparx_128_256_encrypt_block ::
+  "128 word \<Rightarrow> 16 word list \<Rightarrow> 128 word" where
+"sparx_128_256_encrypt_block plaintext rk_words = (
+  let
+    state = sparx_128_256_block_to_words plaintext;
+    all_keys = sparx_128_256_get_all_round_keys rk_words;
+    wk_idx = sparx_128_256_whitening_index;
+    wk0 = if wk_idx     < length all_keys then all_keys ! wk_idx     else 0;
+    wk1 = if wk_idx + 1 < length all_keys then all_keys ! (wk_idx+1) else 0;
+    wk2 = if wk_idx + 2 < length all_keys then all_keys ! (wk_idx+2) else 0;
+    wk3 = if wk_idx + 3 < length all_keys then all_keys ! (wk_idx+3) else 0;
+    state_after_steps =
+      sparx_128_256_encrypt_steps_iterate state all_keys 0;
+    state_final =
+      if length state_after_steps = 8 then
+        [ xor (state_after_steps!0) wk0, state_after_steps!1,
+          xor (state_after_steps!2) wk1, state_after_steps!3,
+          xor (state_after_steps!4) wk2, state_after_steps!5,
+          xor (state_after_steps!6) wk3, state_after_steps!7 ]
+      else state_after_steps
+  in
+    sparx_128_256_words_to_block state_final
+)"
+
+
+definition sparx_128_256_decrypt_block ::
+  "128 word \<Rightarrow> 16 word list \<Rightarrow> 128 word" where
+"sparx_128_256_decrypt_block ciphertext rk_words = (
+  let
+    state = sparx_128_256_block_to_words ciphertext;
+    all_keys = sparx_128_256_get_all_round_keys rk_words;
+    wk_idx = sparx_128_256_whitening_index;
+    wk0 = if wk_idx     < length all_keys then all_keys ! wk_idx     else 0;
+    wk1 = if wk_idx + 1 < length all_keys then all_keys ! (wk_idx+1) else 0;
+    wk2 = if wk_idx + 2 < length all_keys then all_keys ! (wk_idx+2) else 0;
+    wk3 = if wk_idx + 3 < length all_keys then all_keys ! (wk_idx+3) else 0;
+    state_unwhitened =
+      if length state = 8 then
+        [ xor (state!0) wk0, state!1,
+          xor (state!2) wk1, state!3,
+          xor (state!4) wk2, state!5,
+          xor (state!6) wk3, state!7 ]
+      else state;
+    state_after_steps =
+      sparx_128_256_decrypt_steps_iterate state_unwhitened all_keys 0
+  in
+    sparx_128_256_words_to_block state_after_steps
+)"
+
+
+definition sparx_128_256_encrypt :: "128 word \<Rightarrow> 256 word \<Rightarrow> 128 word" where
+  "sparx_128_256_encrypt plaintext master_key = (
+    let rk_words = sparx_128_256_generate_key_schedule master_key
+    in sparx_128_256_encrypt_block plaintext rk_words)"
+
+
+definition sparx_128_256_decrypt :: "128 word \<Rightarrow> 256 word \<Rightarrow> 128 word" where
+  "sparx_128_256_decrypt ciphertext master_key = (
+    let rk_words = sparx_128_256_generate_key_schedule master_key
+    in sparx_128_256_decrypt_block ciphertext rk_words)"
+
+
+end

@@ -1,0 +1,295 @@
+theory SKINNY_128_384
+ imports
+  "HOL-Library.Word"
+  "HOL.Bit_Operations"
+  "HOL.List"
+begin
+
+section ‹SKINNY Block Cipher (128-bit block, 384-bit key)›
+
+subsection ‹Configuration and Types›
+
+definition BLOCK_SIZE :: nat where "BLOCK_SIZE = 128"
+definition KEY_SIZE :: nat where "KEY_SIZE = 384"
+definition NUM_ROUNDS :: nat where "NUM_ROUNDS = 56"
+definition CELL_BITS :: nat where "CELL_BITS = 8"
+definition NUM_CELLS :: nat where "NUM_CELLS = 16"
+definition TWEAK_SIZE :: nat where "TWEAK_SIZE = 3"
+
+type_synonym state = "128 word"
+type_synonym cell = "8 word"
+type_synonym tweak_key = "state"
+type_synonym tweak_key_list = "tweak_key list"
+type_synonym round_key = "state"
+
+definition MASK_CELL :: "8 word" where "MASK_CELL = 0xFF"
+definition MASK_BLOCK :: "128 word" where "MASK_BLOCK = word_of_int (2^128 - 1)"
+
+subsection ‹Cell Access Helper Functions›
+
+definition word_slice :: "nat ⇒ nat ⇒ 'a::len word ⇒ 'b::len word" where
+  "word_slice start len w = 
+      word_of_int ((uint w div 2^start) mod 2^len)"
+
+definition get_cell :: "nat ⇒ state ⇒ cell" where
+  "get_cell i s = word_slice (CELL_BITS * i) CELL_BITS s"
+
+definition set_cell :: "nat ⇒ cell ⇒ state ⇒ state" where
+  "set_cell i c s =
+    (let
+      shift_val = CELL_BITS * i;
+      cell_mask_shifted = push_bit shift_val (ucast MASK_CELL :: state);
+      clear_mask = not cell_mask_shifted;
+      cleared_s = and s clear_mask;
+      shifted_c = push_bit shift_val (ucast c :: state)
+    in
+      or cleared_s shifted_c)"
+
+definition map_cells :: "(cell ⇒ cell) ⇒ state ⇒ state" where
+  "map_cells f s =
+    foldr (λi acc. set_cell i (f (get_cell i acc)) acc) [0..<NUM_CELLS] s"
+
+subsection ‹SubCells (SC) Layer and Inverse›
+
+definition sbox8_table :: "nat list" where "sbox8_table = [0x65, 0x4C, 0x6A, 0x42, 0x4B, 0x63, 0x43, 0x6B, 0x55, 0x75, 0x5A, 0x7A, 0x53, 0x73, 0x5B, 0x7B, 0x35, 0x8C, 0x3A, 0x81, 0x89, 0x33, 0x80, 0x3B, 0x95, 0x25, 0x98, 0x2A, 0x90, 0x23, 0x99, 0x2B, 0xE5, 0xCC, 0xE8, 0xC1, 0xC9, 0xE0, 0xC0, 0xE9, 0xD5, 0xF5, 0xD8, 0xF8, 0xD0, 0xF0, 0xD9, 0xF9, 0xA5, 0x1C, 0xA8, 0x12, 0x1B, 0xA0, 0x13, 0xA9, 0x05, 0xB5, 0x0A, 0xB8, 0x03, 0xB0, 0x0B, 0xB9, 0x32, 0x88, 0x3C, 0x85, 0x8D, 0x34, 0x84, 0x3D, 0x91, 0x22, 0x9C, 0x2C, 0x94, 0x24, 0x9D, 0x2D, 0x62, 0x4A, 0x6C, 0x45, 0x4D, 0x64, 0x44, 0x6D, 0x52, 0x72, 0x5C, 0x7C, 0x54, 0x74, 0x5D, 0x7D, 0xA1, 0x1A, 0xAC, 0x15, 0x1D, 0xA4, 0x14, 0xAD, 0x02, 0xB1, 0x0C, 0xBC, 0x04, 0xB4, 0x0D, 0xBD, 0xE1, 0xC8, 0xEC, 0xC5, 0xCD, 0xE4, 0xC4, 0xED, 0xD1, 0xF1, 0xDC, 0xFC, 0xD4, 0xF4, 0xDD, 0xFD, 0x36, 0x8E, 0x38, 0x82, 0x8B, 0x30, 0x83, 0x39, 0x96, 0x26, 0x9A, 0x28, 0x93, 0x20, 0x9B, 0x29, 0x66, 0x4E, 0x68, 0x41, 0x49, 0x60, 0x40, 0x69, 0x56, 0x76, 0x58, 0x78, 0x50, 0x70, 0x59, 0x79, 0xA6, 0x1E, 0xAA, 0x11, 0x19, 0xA3, 0x10, 0xAB, 0x06, 0xB6, 0x08, 0xBA, 0x00, 0xB3, 0x09, 0xBB, 0xE6, 0xCE, 0xEA, 0xC2, 0xCB, 0xE3, 0xC3, 0xEB, 0xD6, 0xF6, 0xDA, 0xFA, 0xD3, 0xF3, 0xDB, 0xFB, 0x31, 0x8A, 0x3E, 0x86, 0x8F, 0x37, 0x87, 0x3F, 0x92, 0x21, 0x9E, 0x2E, 0x97, 0x27, 0x9F, 0x2F, 0x61, 0x48, 0x6E, 0x46, 0x4F, 0x67, 0x47, 0x6F, 0x51, 0x71, 0x5E, 0x7E, 0x57, 0x77, 0x5F, 0x7F, 0xA2, 0x18, 0xAE, 0x16, 0x1F, 0xA7, 0x17, 0xAF, 0x01, 0xB2, 0x0E, 0xBE, 0x07, 0xB7, 0x0F, 0xBF, 0xE2, 0xCA, 0xEE, 0xC6, 0xCF, 0xE7, 0xC7, 0xEF, 0xD2, 0xF2, 0xDE, 0xFE, 0xD7, 0xF7, 0xDF, 0xFF]"
+definition sbox8_inv_table :: "nat list" where "sbox8_inv_table = [0xAC, 0xE8, 0x68, 0x3C, 0x6C, 0x38, 0xA8, 0xEC, 0xAA, 0xAE, 0x3A, 0x3E, 0x6A, 0x6E, 0xEA, 0xEE, 0xA6, 0xA3, 0x33, 0x36, 0x66, 0x63, 0xE3, 0xE6, 0xE1, 0xA4, 0x61, 0x34, 0x31, 0x64, 0xA1, 0xE4, 0x8D, 0xC9, 0x49, 0x1D, 0x4D, 0x19, 0x89, 0xCD, 0x8B, 0x8F, 0x1B, 0x1F, 0x4B, 0x4F, 0xCB, 0xCF, 0x85, 0xC0, 0x40, 0x15, 0x45, 0x10, 0x80, 0xC5, 0x82, 0x87, 0x12, 0x17, 0x42, 0x47, 0xC2, 0xC7, 0x96, 0x93, 0x03, 0x06, 0x56, 0x53, 0xD3, 0xD6, 0xD1, 0x94, 0x51, 0x04, 0x01, 0x54, 0x91, 0xD4, 0x9C, 0xD8, 0x58, 0x0C, 0x5C, 0x08, 0x98, 0xDC, 0x9A, 0x9E, 0x0A, 0x0E, 0x5A, 0x5E, 0xDA, 0xDE, 0x95, 0xD0, 0x50, 0x05, 0x55, 0x00, 0x90, 0xD5, 0x92, 0x97, 0x02, 0x07, 0x52, 0x57, 0xD2, 0xD7, 0x9D, 0xD9, 0x59, 0x0D, 0x5D, 0x09, 0x99, 0xDD, 0x9B, 0x9F, 0x0B, 0x0F, 0x5B, 0x5F, 0xDB, 0xDF, 0x16, 0x13, 0x83, 0x86, 0x46, 0x43, 0xC3, 0xC6, 0x41, 0x14, 0xC1, 0x84, 0x11, 0x44, 0x81, 0xC4, 0x1C, 0x48, 0xC8, 0x8C, 0x4C, 0x18, 0x88, 0xCC, 0x1A, 0x1E, 0x8A, 0x8E, 0x4A, 0x4E, 0xCA, 0xCE, 0x35, 0x60, 0xE0, 0xA5, 0x65, 0x30, 0xA0, 0xE5, 0x32, 0x37, 0xA2, 0xA7, 0x62, 0x67, 0xE2, 0xE7, 0x3D, 0x69, 0xE9, 0xAD, 0x6D, 0x39, 0xA9, 0xED, 0x3B, 0x3F, 0xAB, 0xAF, 0x6B, 0x6F, 0xEB, 0xEF, 0x26, 0x23, 0xB3, 0xB6, 0x76, 0x73, 0xF3, 0xF6, 0x71, 0x24, 0xF1, 0xB4, 0x21, 0x74, 0xB1, 0xF4, 0x2C, 0x78, 0xF8, 0xBC, 0x7C, 0x28, 0xB8, 0xFC, 0x2A, 0x2E, 0xBA, 0xBE, 0x7A, 0x7E, 0xFA, 0xFE, 0x25, 0x70, 0xF0, 0xB5, 0x75, 0x20, 0xB0, 0xF5, 0x22, 0x27, 0xB2, 0xB7, 0x72, 0x77, 0xF2, 0xF7, 0x2D, 0x79, 0xF9, 0xBD, 0x7D, 0x29, 0xB9, 0xFD, 0x2B, 0x2F, 0xBB, 0xBF, 0x7B, 0x7F, 0xFB, 0xFF]" 
+
+definition skinny_sbox :: "cell ⇒ cell" where
+  "skinny_sbox x = (of_nat (sbox8_table ! unat x) :: cell)"
+
+definition skinny_sbox_inv :: "cell ⇒ cell" where
+  "skinny_sbox_inv x = (of_nat (sbox8_inv_table ! unat x) :: cell)"
+
+definition sub_cells :: "state ⇒ state" where "sub_cells = map_cells skinny_sbox"
+definition sub_cells_inv :: "state ⇒ state" where "sub_cells_inv = map_cells skinny_sbox_inv"
+
+lemma sub_cells_inverse [simp]: "sub_cells_inv (sub_cells s) = s" sorry
+lemma sub_cells_inverse_reverse [simp]: "sub_cells (sub_cells_inv s) = s" sorry
+
+subsection ‹Add Round Constant (ARC) and Add Tweak-Key (ATK)›
+
+definition round_constants_table :: "6 word list" where
+  "round_constants_table = map of_nat [0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3E, 0x3D, 0x3B, 0x37, 0x2F, 0x1E, 0x3C, 0x39, 0x33, 0x27, 0x0E, 0x1D, 0x3A, 0x35, 0x2B, 0x16, 0x2C, 0x18, 0x30, 0x21, 0x02, 0x05, 0x0B, 0x17, 0x2E, 0x1C, 0x38, 0x31, 0x23, 0x06, 0x0D, 0x1B, 0x36, 0x2D, 0x1A, 0x34, 0x29, 0x12, 0x24, 0x08, 0x11, 0x22, 0x04, 0x09, 0x13, 0x26, 0x0C, 0x19, 0x32, 0x25, 0x0A]"
+
+definition add_round_constant :: "nat ⇒ state ⇒ state" where
+"add_round_constant r s =
+  (if r < NUM_ROUNDS then
+    let 
+      rc = round_constants_table ! r;
+      c0 = and rc 0xF; 
+      c1 = ucast (drop_bit 4 rc) :: cell;
+      c2 = of_nat 0x2 :: cell
+    in
+      set_cell 0 (xor (get_cell 0 s) (ucast c0))
+      (set_cell 4 (xor (get_cell 4 s) c1)
+      (set_cell 8 (xor (get_cell 8 s) c2) s))
+  else s)"
+
+definition combine_tweak_keys :: "tweak_key_list ⇒ round_key" where
+"combine_tweak_keys tks =
+  (case tks of
+    [tk1, tk2, tk3] ⇒
+      foldr (λi acc.  
+        let c1 = get_cell i tk1; c2 = get_cell i tk2; c3 = get_cell i tk3;
+            combined = xor (xor c1 c2) c3
+        in set_cell i combined acc
+      ) [0..<8] 0
+  | _ ⇒ 0)"
+
+definition add_tweak_key :: "tweak_key_list ⇒ state ⇒ state" where
+"add_tweak_key tks s = xor s (combine_tweak_keys tks)"
+
+definition add_tweak_key_call :: "state ⇒ tweak_key_list ⇒ state" where
+"add_tweak_key_call s tks = add_tweak_key tks s"
+
+definition add_tweak_key_call_inv :: "state ⇒ tweak_key_list ⇒ state" where
+"add_tweak_key_call_inv s tks = add_tweak_key tks s"
+
+
+definition skinny_lfsr :: "nat ⇒ cell ⇒ cell" where
+"skinny_lfsr i c =
+  (if i = 1 then 
+    (let
+      left_shift = push_bit 1 c;
+      tap1 = drop_bit (CELL_BITS - 1) c;
+      tap2 = drop_bit (CELL_BITS - 3) c
+    in
+      xor left_shift (xor tap1 tap2))
+  else if i = 2 then 
+    (let
+      right_shift = drop_bit 1 c;
+      tap1 = push_bit (CELL_BITS - 1) c;
+      tap2 = push_bit 1 c
+    in
+      xor right_shift (xor tap1 tap2))
+  else c)"
+
+definition tk_update :: "nat ⇒ tweak_key ⇒ tweak_key" where
+"tk_update i tk = 
+  (let
+    cells = map (λj. get_cell j tk) [0..<NUM_CELLS];
+
+    tk_permuted_cells = [
+      cells ! 9, cells ! 15, cells ! 8, cells ! 13, 
+      cells ! 10, cells ! 14, cells ! 12, cells ! 11,
+      cells ! 0, cells ! 1, cells ! 2, cells ! 3, 
+      cells ! 4, cells ! 5, cells ! 6, cells ! 7
+    ];
+    updated_cells = 
+      (if i = 0 then 
+        tk_permuted_cells
+      else
+        let row2_lfsr = map (λc. skinny_lfsr i c) (take 4 (drop 8 tk_permuted_cells));
+            row3_lfsr = map (λc. skinny_lfsr i c) (take 4 (drop 12 tk_permuted_cells));
+            rows01 = take 8 tk_permuted_cells
+        in
+          rows01 @ row2_lfsr @ row3_lfsr)
+  in
+    foldr (λ(j,c) acc. set_cell j c acc) (zip [0..<NUM_CELLS] updated_cells) 0)"
+
+
+
+fun build_key_schedule_single :: "tweak_key ⇒ nat ⇒ round_key list" where
+  "build_key_schedule_single tk 0 = []"
+| "build_key_schedule_single tk (Suc n) = tk # build_key_schedule_single (tk_update 0 tk) n"
+
+fun build_key_schedule_double_list :: "tweak_key_list ⇒ nat ⇒ tweak_key_list list" where
+  "build_key_schedule_double_list tks 0 = []"
+| "build_key_schedule_double_list [tk1, tk2] (Suc n) =
+    (let tk1' = tk_update 0 tk1; tk2' = tk_update 1 tk2 in
+     [tk1, tk2] # build_key_schedule_double_list [tk1', tk2'] n)"
+| "build_key_schedule_double_list _ (Suc n) = []"
+
+fun build_key_schedule_triple_list :: "tweak_key_list ⇒ nat ⇒ tweak_key_list list" where
+  "build_key_schedule_triple_list tks 0 = []"
+| "build_key_schedule_triple_list [tk1, tk2, tk3] (Suc n) =
+    (let tk1' = tk_update 0 tk1; tk2' = tk_update 1 tk2; tk3' = tk_update 2 tk3 in
+     [tk1, tk2, tk3] # build_key_schedule_triple_list [tk1', tk2', tk3'] n)"
+| "build_key_schedule_triple_list _ (Suc n) = []"
+
+
+definition key_schedule :: "tweak_key_list ⇒ tweak_key_list list" where
+"key_schedule tks =
+  (case tks of
+    [tk1, tk2, tk3] ⇒ build_key_schedule_triple_list [tk1, tk2, tk3] NUM_ROUNDS
+  | _ ⇒ [])"
+
+subsection ‹Shift Rows (SR) Layer and Inverse›
+
+definition shift_rows_map :: "nat list" where
+  "shift_rows_map = [0, 1, 2, 3, 5, 6, 7, 4, 10, 11, 8, 9, 15, 12, 13, 14]"
+
+definition shift_rows_inv_map :: "nat list" where
+  "shift_rows_inv_map = [0, 1, 2, 3, 7, 4, 5, 6, 10, 11, 8, 9, 13, 14, 15, 12]"
+
+definition shift_rows :: "state ⇒ state" where
+  "shift_rows s =
+    (let
+      cells = map (λi. get_cell i s) [0..<NUM_CELLS];
+      permuted = map (λi. cells ! i) shift_rows_map
+    in
+      foldr (λ(i,c) acc. set_cell i c acc) (zip [0..<NUM_CELLS] permuted) 0)"
+
+definition shift_rows_inv :: "state ⇒ state" where
+  "shift_rows_inv s =
+    (let
+      cells = map (λi. get_cell i s) [0..<NUM_CELLS];
+      permuted = map (λi. cells ! i) shift_rows_inv_map
+    in
+      foldr (λ(i,c) acc. set_cell i c acc) (zip [0..<NUM_CELLS] permuted) 0)"
+
+lemma shift_rows_inverse [simp]: "shift_rows_inv (shift_rows s) = s" sorry
+
+subsection ‹Mix Columns (MC) Layer and Inverse›
+
+type_synonym column = "cell list"
+
+definition mc_column_transform :: "column ⇒ column" where
+"mc_column_transform cs =
+  (let c0 = cs ! 0; c1 = cs ! 1; c2 = cs ! 2; c3 = cs ! 3 in
+    [xor (xor c0 c2) c3, c0, xor c1 c2, xor c0 c2])"
+
+definition mc_column_inv_transform :: "column ⇒ column" where
+"mc_column_inv_transform cs =
+  (let c0 = cs ! 0; c1 = cs ! 1; c2 = cs ! 2; c3 = cs ! 3 in
+    [c1, xor (xor (xor c0 c1) c2) c3, xor (xor c0 c2) c3, xor c0 c1])"
+
+definition mix_columns :: "state ⇒ state" where
+"mix_columns s =
+  (let
+    get_col = λj. [get_cell j s, get_cell (j+4) s, get_cell (j+8) s, get_cell (j+12) s];
+
+    col_0' = mc_column_transform (get_col 0);
+    col_1' = mc_column_transform (get_col 1);
+    col_2' = mc_column_transform (get_col 2);
+    col_3' = mc_column_transform (get_col 3);
+
+    new_cells = [col_0'!0, col_1'!0, col_2'!0, col_3'!0,
+                 col_0'!1, col_1'!1, col_2'!1, col_3'!1,
+                 col_0'!2, col_1'!2, col_2'!2, col_3'!2,
+                 col_0'!3, col_1'!3, col_2'!3, col_3'!3]
+  in
+    foldr (λ(i,c) acc. set_cell i c acc) (zip [0..<NUM_CELLS] new_cells) 0)"
+
+definition mix_columns_inv :: "state ⇒ state" where
+"mix_columns_inv s =
+  (let
+    get_col = λj. [get_cell j s, get_cell (j+4) s, get_cell (j+8) s, get_cell (j+12) s];
+
+    col_0' = mc_column_inv_transform (get_col 0);
+    col_1' = mc_column_inv_transform (get_col 1);
+    col_2' = mc_column_inv_transform (get_col 2);
+    col_3' = mc_column_inv_transform (get_col 3);
+
+    new_cells = [col_0'!0, col_1'!0, col_2'!0, col_3'!0,
+                 col_0'!1, col_1'!1, col_2'!1, col_3'!1,
+                 col_0'!2, col_1'!2, col_2'!2, col_3'!2,
+                 col_0'!3, col_1'!3, col_2'!3, col_3'!3]
+  in
+    foldr (λ(i,c) acc. set_cell i c acc) (zip [0..<NUM_CELLS] new_cells) 0)"
+
+lemma mix_columns_inverse [simp]: "mix_columns_inv (mix_columns s) = s" sorry
+
+subsection ‹Tweak-Key Schedule and Cipher Implementation›
+
+definition skinny_round :: "state ⇒ nat ⇒ tweak_key_list ⇒ state" where
+"skinny_round ste r_num tk_list =
+  mix_columns (shift_rows (add_tweak_key_call (add_round_constant r_num (sub_cells ste)) tk_list))"
+
+definition skinny_round_inv :: "state ⇒ nat ⇒ tweak_key_list ⇒ state" where
+"skinny_round_inv ste r_num tk_list =
+  sub_cells_inv (
+    add_round_constant r_num (
+      add_tweak_key_call_inv (
+        shift_rows_inv (
+          mix_columns_inv ste
+        )
+      ) tk_list
+    )
+  )"
+
+fun skinny_encrypt_iterate :: "state ⇒ tweak_key_list list ⇒ nat ⇒ state" where
+  "skinny_encrypt_iterate state [] _ = state"
+| "skinny_encrypt_iterate state (tk_list#tks) r_num =
+    (if r_num = NUM_ROUNDS then state
+    else skinny_encrypt_iterate (skinny_round state r_num tk_list) tks (r_num + 1))"
+
+definition skinny_encrypt :: "state ⇒ tweak_key_list ⇒ state" where
+  "skinny_encrypt plaintext tk_list =
+    skinny_encrypt_iterate plaintext (key_schedule tk_list) 0"
+
+fun skinny_decrypt_iterate :: "state ⇒ tweak_key_list list ⇒ nat ⇒ state" where
+  "skinny_decrypt_iterate state [] _ = state"
+| "skinny_decrypt_iterate state (tk_list#tks) r_num =
+    (if r_num = NUM_ROUNDS then state
+    else skinny_decrypt_iterate (skinny_round_inv state r_num tk_list) tks (r_num + 1))"
+
+definition skinny_decrypt :: "state ⇒ tweak_key_list ⇒ state" where
+  "skinny_decrypt ciphertext tk_list =
+    skinny_decrypt_iterate ciphertext (rev (key_schedule tk_list)) 0"
+
+theorem skinny_correctness:
+  "skinny_decrypt (skinny_encrypt s k) k = s"
+  sorry
+
+end
